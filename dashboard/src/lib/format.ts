@@ -2,7 +2,8 @@ const LOCALE = "fr-FR";
 
 export function formatMoney(value: number, currency: string): string {
   try {
-    return new Intl.NumberFormat(LOCALE, { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
+    // Code ISO (« USD ») plutôt que symbole localisé (« $US ») : convention des terminaux de marché
+    return new Intl.NumberFormat(LOCALE, { style: "currency", currency, currencyDisplay: "code", maximumFractionDigits: 2 }).format(value);
   } catch {
     return `${formatNumber(value, 2)} ${currency}`; // code devise non reconnu par Intl
   }

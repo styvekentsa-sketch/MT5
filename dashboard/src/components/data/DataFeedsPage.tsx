@@ -32,7 +32,7 @@ export function DataFeedsPage({ feeds, webhooks, baseUrl, lastUpdated, onRefresh
         <button
           type="button"
           onClick={onRefresh}
-          className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 text-xs text-slate-300 hover:bg-white/10"
+          className="inline-flex h-11 shrink-0 items-center gap-1.5 rounded-md border border-line bg-surface-2 px-3 text-xs text-slate-300 hover:bg-line"
           title="Rafraîchir"
         >
           <RefreshCw className="size-4" aria-hidden />

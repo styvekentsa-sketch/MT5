@@ -9,19 +9,18 @@ interface MetricCardProps {
   icon: ReactNode;
   value: ReactNode;
   sub?: ReactNode;
+  /** Filet vertical coloré (ex : "border-l-emerald-500") pour une métrique signée */
   accent?: string;
 }
 
-function MetricCard({ label, icon, value, sub, accent = "from-sky-500/20" }: MetricCardProps) {
+function MetricCard({ label, icon, value, sub, accent = "border-l-line-strong" }: MetricCardProps) {
   return (
-    <div
-      className={`relative min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-linear-to-br ${accent} to-white/[0.02] p-4 backdrop-blur-xl sm:p-5`}
-    >
-      <div className="flex items-center justify-between gap-2 text-[11px] font-medium tracking-wide text-slate-400 uppercase sm:text-xs">
+    <div className={`min-w-0 rounded-md border border-l-2 border-line bg-surface p-4 sm:px-5 ${accent}`}>
+      <div className="flex items-center justify-between gap-2 text-[11px] font-medium tracking-[0.08em] text-slate-400 uppercase">
         <span className="truncate">{label}</span>
-        <span className="shrink-0 text-slate-500">{icon}</span>
+        <span className="shrink-0 text-slate-600">{icon}</span>
       </div>
-      <div className="mt-2 font-mono text-lg font-semibold break-words text-white tabular-nums sm:mt-3 sm:text-2xl">
+      <div className="mt-2 overflow-hidden font-mono text-[15px] font-medium text-ellipsis whitespace-nowrap text-white tabular-nums sm:mt-3 sm:text-[1.6rem] sm:leading-8">
         {value}
       </div>
       {sub && <div className="mt-1 text-[11px] text-slate-400 tabular-nums sm:text-xs">{sub}</div>}
@@ -35,7 +34,7 @@ export function AccountOverview({ account }: { account: Account | null }) {
     return (
       <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         {Array.from({ length: 4 }, (_, i) => (
-          <div key={i} className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+          <div key={i} className="rounded-md border border-line bg-surface p-5">
             <Skeleton className="h-3 w-24" />
             <Skeleton className="mt-4 h-7 w-36" />
             <Skeleton className="mt-2 h-3 w-20" />
@@ -60,14 +59,12 @@ export function AccountOverview({ account }: { account: Account | null }) {
       <MetricCard
         label="Fonds propres"
         icon={<Scale className="size-4" />}
-        accent="from-indigo-500/20"
         value={money(account.equity)}
         sub={<span className={signColor(equityDelta)}>{equityDelta >= 0 ? "+" : ""}{money(equityDelta)} latent</span>}
       />
       <MetricCard
         label="Marge libre"
         icon={<PiggyBank className="size-4" />}
-        accent="from-violet-500/20"
         value={money(account.margin_free)}
         sub={
           account.margin > 0
@@ -78,7 +75,7 @@ export function AccountOverview({ account }: { account: Account | null }) {
       <MetricCard
         label="P/L du jour"
         icon={dailyUp ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}
-        accent={dailyUp ? "from-emerald-500/20" : "from-rose-500/25"}
+        accent={account.daily_pl > 0 ? "border-l-emerald-500" : account.daily_pl < 0 ? "border-l-rose-500" : undefined}
         value={
           <span className={signColor(account.daily_pl)}>
             {account.daily_pl > 0 ? "+" : ""}

@@ -32,7 +32,7 @@ export function CycleOutcomes({ status }: { status: Status | null }) {
       {outcomes.length === 0 ? (
         <p className="px-5 py-6 text-center text-sm text-slate-400">Aucun tour exécuté pour l'instant.</p>
       ) : (
-        <ul className="divide-y divide-white/5">
+        <ul className="divide-y divide-line">
           {outcomes.map((o) => {
             const style = OUTCOME_STYLES[o.status] ?? OUTCOME_STYLES.hold;
             return (

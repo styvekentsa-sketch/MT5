@@ -21,7 +21,7 @@ interface ControlPanelProps {
 type BusyAction = "start" | "stop" | "mode" | "kill";
 
 const STATE_STYLES = {
-  running: { label: "En marche", dot: "bg-emerald-400 animate-pulse", text: "text-emerald-300" },
+  running: { label: "En marche", dot: "bg-emerald-400", text: "text-emerald-300" },
   paused: { label: "En pause", dot: "bg-amber-400", text: "text-amber-300" },
   stopped: { label: "Arrêté", dot: "bg-slate-500", text: "text-slate-400" },
 } as const;
@@ -29,7 +29,7 @@ const STATE_STYLES = {
 function StatePill({ status }: { status: Status | null }) {
   const style = status ? STATE_STYLES[status.state] : null;
   return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold">
+    <span className="inline-flex items-center gap-2 rounded border border-line bg-surface-2 px-2.5 py-1 text-xs font-medium">
       <span className={`size-2 rounded-full ${style?.dot ?? "bg-slate-600"}`} aria-hidden />
       <span className={style?.text ?? "text-slate-500"}>{style?.label ?? "Inconnu"}</span>
     </span>
@@ -41,7 +41,7 @@ function ModePill({ mode }: { mode: Mode | undefined }) {
   const live = mode === "LIVE";
   return (
     <span
-      className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-bold tracking-wider ${
+      className={`inline-flex items-center rounded px-2.5 py-1 font-mono text-[11px] font-medium tracking-wider ${
         live
           ? "bg-rose-500/20 text-rose-300 ring-1 ring-rose-500/50"
           : "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/40"
@@ -104,14 +104,14 @@ export function ControlPanel({
   const segment = "min-h-11 flex-1 rounded-lg px-2 text-xs font-bold transition disabled:cursor-not-allowed lg:flex-none lg:px-3";
 
   return (
-    <header className="pt-safe sticky top-0 z-40 border-b border-white/10 bg-slate-950/70 backdrop-blur-xl">
+    <header className="pt-safe sticky top-0 z-40 border-b border-line bg-canvas/95">
       <div className="px-safe mx-auto flex max-w-7xl flex-col gap-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:py-4">
         {/* Identité + statut */}
         <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-center lg:gap-3">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="grid size-9 shrink-0 place-items-center rounded-xl bg-linear-to-br from-sky-500 to-indigo-600 shadow-lg shadow-sky-900/40">
-                <Bot className="size-5 text-white" aria-hidden />
+              <div className="grid size-9 shrink-0 place-items-center rounded-md border border-line-strong bg-surface-2">
+                <Bot className="size-5 text-slate-300" aria-hidden />
               </div>
               <div className="min-w-0">
                 <h1 className="text-base leading-tight font-bold text-white">MT5 Trading Bot</h1>
@@ -165,7 +165,7 @@ export function ControlPanel({
           )}
 
           <div
-            className="flex h-12 gap-1 rounded-xl border border-white/10 bg-white/5 p-0.5"
+            className="flex h-12 gap-1 rounded-md border border-line bg-surface-2 p-0.5"
             role="group"
             aria-label="Mode d'exécution"
           >
@@ -174,7 +174,7 @@ export function ControlPanel({
               disabled={controlsDisabled || !isLive}
               aria-pressed={!isLive}
               onClick={() => run("mode", () => onSetMode(false))}
-              className={`${segment} ${!isLive ? "bg-emerald-500/80 text-white" : "text-slate-300 hover:bg-white/10"}`}
+              className={`${segment} ${!isLive ? "bg-emerald-500/80 text-white" : "text-slate-300 hover:bg-line"}`}
             >
               PAPER
             </button>
@@ -183,7 +183,7 @@ export function ControlPanel({
               disabled={controlsDisabled || isLive}
               aria-pressed={isLive}
               onClick={() => setLiveDialogOpen(true)}
-              className={`${segment} ${isLive ? "bg-rose-600 text-white" : "text-slate-300 hover:bg-white/10"}`}
+              className={`${segment} ${isLive ? "bg-rose-600 text-white" : "text-slate-300 hover:bg-line"}`}
             >
               LIVE
             </button>

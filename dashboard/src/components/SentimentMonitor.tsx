@@ -24,9 +24,9 @@ function LabelBadge({ label, score }: { label: SentimentLabel; score?: number })
 function ScoreGauge({ score }: { score: number }) {
   const position = ((Math.max(-1, Math.min(1, score)) + 1) / 2) * 100;
   return (
-    <div className="relative h-2 rounded-full bg-linear-to-r from-rose-500/70 via-slate-600/60 to-emerald-500/70">
+    <div className="relative h-1.5 rounded-sm bg-linear-to-r from-rose-500/60 via-slate-700 to-emerald-500/60">
       <div
-        className="absolute top-1/2 size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-slate-950 bg-white shadow-lg transition-[left] duration-700"
+        className="absolute top-1/2 size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-slate-950 bg-white transition-[left] duration-700"
         style={{ left: `${position}%` }}
         aria-hidden
       />
@@ -51,7 +51,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
         <button
           type="button"
           onClick={onRefresh}
-          className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-white/10 hover:text-white"
+          className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-line hover:text-white"
           title="Rafraîchir"
         >
           <RefreshCw className="size-3.5" aria-hidden />
@@ -68,7 +68,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
         </div>
       ) : (
         <>
-          <div className="space-y-4 border-b border-white/5 p-5">
+          <div className="space-y-4 border-b border-line p-5">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs tracking-wide text-slate-400 uppercase">Sentiment global</p>
@@ -89,7 +89,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
               {Object.entries(sentiment.by_symbol).map(([symbol, score]) => (
                 <span
                   key={symbol}
-                  className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs"
+                  className="inline-flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-2.5 py-1 text-xs"
                   title="Sentiment orienté pour la paire (> 0 = haussier)"
                 >
                   <span className="font-semibold text-slate-200">{symbol}</span>
@@ -102,9 +102,9 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
           {sentiment.articles.length === 0 ? (
             <p className="px-5 py-10 text-center text-sm text-slate-400">Aucune actualité récente.</p>
           ) : (
-            <ul className="divide-y divide-white/5 lg:max-h-[32rem] lg:overflow-y-auto lg:overscroll-contain">
+            <ul className="divide-y divide-line lg:max-h-[32rem] lg:overflow-y-auto lg:overscroll-contain">
               {sentiment.articles.map((article) => (
-                <li key={article.link} className="px-5 py-3 transition hover:bg-white/[0.03]">
+                <li key={article.link} className="px-5 py-3 transition hover:bg-surface-2">
                   <div className="flex items-start justify-between gap-3">
                     {isSafeUrl(article.link) ? (
                       <a

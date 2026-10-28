@@ -42,7 +42,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       type="button"
       onClick={() => void copy()}
-      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 text-xs text-slate-300 hover:bg-white/10"
+      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface-2 px-2.5 text-xs text-slate-300 hover:bg-line"
     >
       {state === "copied" ? <Check className="size-3.5 text-emerald-400" /> : <Copy className="size-3.5" />}
       {state === "copied" ? "Copié" : state === "failed" ? "Sélectionnez" : "Copier"}
@@ -78,7 +78,7 @@ export function WebhookConsole({ log, baseUrl }: WebhookConsoleProps) {
         )
       }
     >
-      <details className="group border-b border-white/5 px-4 py-3 text-xs text-slate-400 sm:px-5">
+      <details className="group border-b border-line px-4 py-3 text-xs text-slate-400 sm:px-5">
         <summary className="flex min-h-9 cursor-pointer items-center font-semibold text-slate-300 select-none">
           Configurer TradingView
         </summary>
@@ -94,18 +94,18 @@ export function WebhookConsole({ log, baseUrl }: WebhookConsoleProps) {
           <div>
             <p className="mb-1 text-slate-500">URL du webhook</p>
             <div className="flex items-start gap-2">
-              <code className="min-w-0 flex-1 rounded-lg bg-black/40 px-2 py-1.5 font-mono break-all text-slate-200">{endpoint}</code>
+              <code className="min-w-0 flex-1 rounded-lg bg-canvas px-2 py-1.5 font-mono break-all text-slate-200">{endpoint}</code>
               <CopyButton text={endpoint} />
             </div>
           </div>
           <div>
             <p className="mb-1 text-slate-500">Message d'alerte (exemple)</p>
-            <pre className="rounded-lg bg-black/40 px-2 py-1.5 font-mono text-slate-300">{EXAMPLE_MESSAGE}</pre>
+            <pre className="rounded-lg bg-canvas px-2 py-1.5 font-mono text-slate-300">{EXAMPLE_MESSAGE}</pre>
           </div>
         </div>
       </details>
 
-      <div className="m-3 rounded-xl border border-white/5 bg-black/50 font-mono text-xs sm:m-4">
+      <div className="m-3 rounded-md border border-line bg-canvas font-mono text-xs sm:m-4">
         {log === null ? (
           <div className="space-y-2 p-3">
             <Skeleton className="h-4 w-3/4" />
@@ -116,11 +116,11 @@ export function WebhookConsole({ log, baseUrl }: WebhookConsoleProps) {
             &gt; En attente de signaux<span className="animate-pulse">_</span>
           </p>
         ) : (
-          <ol className="divide-y divide-white/5 lg:max-h-[28rem] lg:overflow-y-auto lg:overscroll-contain">
+          <ol className="divide-y divide-line lg:max-h-[28rem] lg:overflow-y-auto lg:overscroll-contain">
             {log.events.map((event, index) => (
               <li key={event.id}>
                 <details open={index === 0}>
-                  <summary className="flex min-h-11 cursor-pointer flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 select-none hover:bg-white/5">
+                  <summary className="flex min-h-11 cursor-pointer flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 select-none hover:bg-surface-2">
                     <span className="text-slate-500">
                       [{formatDayIfNotToday(event.received_at)} {formatClock(event.received_at, true)}]
                     </span>

@@ -88,9 +88,9 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
                   ))}
                 </tr>
               </thead>
-              <tbody className="divide-y divide-white/5 font-mono tabular-nums">
+              <tbody className="divide-y divide-line font-mono tabular-nums">
                 {positions.map((p) => (
-                  <tr key={p.ticket} className="transition hover:bg-white/3">
+                  <tr key={p.ticket} className="transition hover:bg-surface-2">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2 font-sans">
                         <span className="font-semibold text-white">{p.symbol}</span>
@@ -122,7 +122,7 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
           </div>
 
           {/* Mobile : cartes */}
-          <ul className="divide-y divide-white/5 md:hidden">
+          <ul className="divide-y divide-line md:hidden">
             {positions.map((p) => (
               <li key={p.ticket} className="space-y-2 px-4 py-3">
                 <div className="flex items-center justify-between gap-2">

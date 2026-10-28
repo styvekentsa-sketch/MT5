@@ -34,7 +34,7 @@ interface SettingsDialogProps {
 type TestResult = { ok: boolean; message: string } | null;
 
 const inputClass =
-  "h-12 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 font-mono text-base text-white outline-none focus:border-sky-400 sm:text-sm";
+  "h-12 w-full rounded-md border border-line bg-canvas px-3 font-mono text-base text-white outline-none focus:border-sky-400 sm:text-sm";
 
 /** Paramètres de connexion (URL de l'API, clé) et installation de l'application. */
 export function SettingsDialog({
@@ -96,7 +96,7 @@ export function SettingsDialog({
         </div>
 
         {error && (
-          <p className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</p>
+          <p className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">{error}</p>
         )}
 
         <label className="block space-y-1.5 text-sm text-slate-300">
@@ -142,7 +142,7 @@ export function SettingsDialog({
             <button
               type="button"
               onClick={() => setVisible((v) => !v)}
-              className="absolute top-1/2 right-0.5 grid size-11 -translate-y-1/2 place-items-center rounded-xl text-slate-400 hover:text-white"
+              className="absolute top-1/2 right-0.5 grid size-11 -translate-y-1/2 place-items-center rounded-md text-slate-400 hover:text-white"
               aria-label={visible ? "Masquer la clé" : "Afficher la clé"}
             >
               {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
@@ -152,7 +152,7 @@ export function SettingsDialog({
 
         {testResult && (
           <p
-            className={`flex items-start gap-2 rounded-xl border p-3 text-sm ${
+            className={`flex items-start gap-2 rounded-md border p-3 text-sm ${
               testResult.ok
                 ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
                 : "border-rose-500/40 bg-rose-500/10 text-rose-200"
@@ -192,14 +192,14 @@ export function SettingsDialog({
 function InstallSection({ state }: { state: InstallState }) {
   if (state.installed) {
     return (
-      <p className="flex items-center gap-2 border-t border-white/10 pt-4 text-sm text-emerald-300">
+      <p className="flex items-center gap-2 border-t border-line pt-4 text-sm text-emerald-300">
         <CircleCheck className="size-4" aria-hidden /> Application installée sur cet appareil
       </p>
     );
   }
   if (state.canInstall) {
     return (
-      <div className="border-t border-white/10 pt-4">
+      <div className="border-t border-line pt-4">
         <Button size="lg" variant="primary" className="w-full" icon={<Download className="size-4" />} onClick={() => void state.install()}>
           Installer l'application
         </Button>
@@ -208,7 +208,7 @@ function InstallSection({ state }: { state: InstallState }) {
   }
   if (state.ios) {
     return (
-      <div className="space-y-1 border-t border-white/10 pt-4 text-sm text-slate-300">
+      <div className="space-y-1 border-t border-line pt-4 text-sm text-slate-300">
         <p className="font-semibold text-white">Installer sur iPhone / iPad</p>
         <p className="flex flex-wrap items-center gap-1">
           Dans Safari, touchez <Share className="size-4 text-sky-400" aria-label="Partager" /> puis

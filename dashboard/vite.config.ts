@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
-const THEME_COLOR = "#020617"; // slate-950, fond du dashboard
+const THEME_COLOR = "#0b0d10"; // anthracite, fond du dashboard (--color-canvas)
 
 export default defineConfig({
   plugins: [
@@ -37,7 +37,7 @@ export default defineConfig({
       workbox: {
         // Seule l'interface est mise en cache : les données de trading (autre origine,
         // l'API du bot) ne le sont jamais, pour ne pas afficher un état périmé.
-        globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
+        globPatterns: ["**/*.{js,css,html,ico,png,svg,woff2}"],
         navigateFallback: "/index.html",
         cleanupOutdatedCaches: true,
       },

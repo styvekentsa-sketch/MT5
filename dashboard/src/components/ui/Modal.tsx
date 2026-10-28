@@ -27,14 +27,14 @@ export function Modal({ open, labelledBy, onClose, children }: ModalProps) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/75 backdrop-blur-sm sm:items-center sm:p-4"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 sm:items-center sm:p-4"
       onMouseDown={(e) => e.target === e.currentTarget && onClose?.()}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className="pb-sheet max-h-[92dvh] w-full overflow-y-auto overscroll-contain rounded-t-3xl border border-white/10 bg-slate-900/95 px-5 pt-6 shadow-2xl backdrop-blur-xl sm:max-w-md sm:rounded-2xl sm:p-6"
+        className="pb-sheet max-h-[92dvh] w-full overflow-y-auto overscroll-contain rounded-t-lg border border-line bg-surface px-5 pt-6 sm:max-w-md sm:rounded-md sm:p-6"
       >
         {children}
       </div>

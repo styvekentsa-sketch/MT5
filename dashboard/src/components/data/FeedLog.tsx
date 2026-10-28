@@ -28,8 +28,8 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`h-10 shrink-0 rounded-xl px-3 text-xs font-semibold transition ${
-        active ? "bg-sky-500/90 text-white" : "border border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+      className={`h-10 shrink-0 rounded-md px-3 text-xs font-semibold transition ${
+        active ? "bg-sky-500/90 text-white" : "border border-line bg-surface-2 text-slate-300 hover:bg-line"
       }`}
     >
       {children}
@@ -41,7 +41,7 @@ function SymbolImpact({ symbol, direction }: { symbol: string; direction: number
   const Icon = direction >= 0 ? ArrowUpRight : ArrowDownRight;
   return (
     <span
-      className={`inline-flex items-center gap-0.5 rounded-md bg-white/5 px-1.5 py-0.5 text-[11px] font-semibold ${signColor(direction)}`}
+      className={`inline-flex items-center gap-0.5 rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold ${signColor(direction)}`}
       title={direction >= 0 ? "Actif de base concerné (même sens que le sentiment)" : "Devise de cotation concernée (sens inversé)"}
     >
       {symbol}
@@ -83,7 +83,7 @@ function NewsEntry({ item }: { item: NewsItem }) {
           <SymbolImpact key={symbol} symbol={symbol} direction={direction} />
         ))}
         {item.keywords.map((keyword) => (
-          <span key={keyword} className="rounded-md border border-white/10 px-1.5 py-0.5 text-[11px] text-slate-400">
+          <span key={keyword} className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-slate-400">
             #{keyword}
           </span>
         ))}
@@ -101,7 +101,7 @@ function EconomicEntry({ item }: { item: CalendarEvent }) {
       <div className="flex flex-wrap items-center gap-1.5">
         <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${KIND_BADGE.economic.className}`}>Économique</span>
         <span className="rounded-md bg-sky-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-sky-300">Forex Factory</span>
-        <span className="rounded-md bg-white/10 px-1.5 py-0.5 font-mono text-[11px] font-bold text-slate-100">{item.currency}</span>
+        <span className="rounded-md bg-line px-1.5 py-0.5 font-mono text-[11px] font-bold text-slate-100">{item.currency}</span>
         <span className="rounded-md bg-rose-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-rose-300">Impact {item.impact}</span>
         {item.blocks_trading && <span className="rounded-md bg-rose-600 px-1.5 py-0.5 text-[11px] font-bold text-white">BLOQUE</span>}
       </div>
@@ -114,7 +114,7 @@ function EconomicEntry({ item }: { item: CalendarEvent }) {
       {item.symbols.length > 0 && (
         <div className="mt-1.5 flex flex-wrap gap-1.5">
           {item.symbols.map((symbol) => (
-            <span key={symbol} className="rounded-md bg-white/5 px-1.5 py-0.5 text-[11px] font-semibold text-amber-200">
+            <span key={symbol} className="rounded-md bg-surface-2 px-1.5 py-0.5 text-[11px] font-semibold text-amber-200">
               {symbol}
             </span>
           ))}
@@ -158,7 +158,7 @@ export function FeedLog({ news, calendar, symbols }: FeedLogProps) {
       icon={<ScrollText className="size-4" />}
       actions={<span className="text-xs text-slate-500">{entries.length} entrée(s)</span>}
     >
-      <div className="space-y-2 border-b border-white/5 px-4 py-3 sm:px-5">
+      <div className="space-y-2 border-b border-line px-4 py-3 sm:px-5">
         <div className="-mx-4 flex gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="group" aria-label="Filtrer par symbole">
           <FilterChip active={symbolFilter === "all"} onClick={() => setSymbolFilter("all")}>Tous les symboles</FilterChip>
           {symbols.map((symbol) => (
@@ -183,9 +183,9 @@ export function FeedLog({ news, calendar, symbols }: FeedLogProps) {
       ) : entries.length === 0 ? (
         <p className="px-5 py-10 text-center text-sm text-slate-400">Aucune donnée capturée pour ce filtre.</p>
       ) : (
-        <ol className="divide-y divide-white/5 lg:max-h-[52rem] lg:overflow-y-auto lg:overscroll-contain">
+        <ol className="divide-y divide-line lg:max-h-[52rem] lg:overflow-y-auto lg:overscroll-contain">
           {entries.map((entry) => (
-            <li key={entry.key} className="flex gap-3 px-4 py-3 transition hover:bg-white/3 sm:px-5">
+            <li key={entry.key} className="flex gap-3 px-4 py-3 transition hover:bg-surface-2 sm:px-5">
               <TimeColumn time={entry.time} />
               <div className="min-w-0 flex-1">
                 {entry.kind === "sentiment" ? <NewsEntry item={entry.item} /> : <EconomicEntry item={entry.item} />}

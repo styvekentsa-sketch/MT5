@@ -51,7 +51,7 @@ export function ConfirmDialog({
           type="button"
           onClick={onCancel}
           disabled={busy}
-          className="-m-2 grid size-11 place-items-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white"
+          className="-m-2 grid size-11 place-items-center rounded-md text-slate-400 hover:bg-line hover:text-white"
           aria-label="Fermer"
         >
           <X className="size-5" />
@@ -72,7 +72,7 @@ export function ConfirmDialog({
             autoCapitalize="characters"
             autoComplete="off"
             spellCheck={false}
-            className="mt-2 h-12 w-full rounded-xl border border-white/10 bg-slate-950/60 px-3 font-mono text-base text-white outline-none focus:border-rose-400"
+            className="mt-2 h-12 w-full rounded-md border border-line bg-canvas px-3 font-mono text-base text-white outline-none focus:border-rose-400"
           />
         </label>
       )}

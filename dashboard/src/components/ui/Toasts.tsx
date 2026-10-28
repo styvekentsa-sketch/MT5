@@ -15,7 +15,7 @@ export function Toasts({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id:
         return (
           <div
             key={id}
-            className={`pointer-events-auto flex items-start gap-3 rounded-xl border bg-slate-900/90 p-3 text-sm shadow-xl backdrop-blur-xl ${className}`}
+            className={`pointer-events-auto flex items-start gap-3 rounded-md border bg-surface p-3 text-sm ${className}`}
           >
             <Icon className="mt-0.5 size-4 shrink-0" aria-hidden />
             <p className="flex-1 break-words">{message}</p>

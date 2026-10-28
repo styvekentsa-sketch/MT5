@@ -160,7 +160,7 @@ export default function App() {
       <main className="px-safe pb-mobile-nav mx-auto flex max-w-7xl flex-col gap-4 pt-4 lg:gap-6 lg:pt-6 lg:pb-8">
         <ConnectionBanner online={online} baseUrl={connection.baseUrl} error={bannerError} status={status.data} />
 
-        <nav className="hidden gap-1 self-start rounded-xl border border-white/10 bg-white/5 p-1 lg:flex" aria-label="Vues">
+        <nav className="hidden gap-1 self-start rounded-md border border-line bg-surface-2 p-1 lg:flex" aria-label="Vues">
           {VIEW_TABS.map(({ label, tab: target }) => {
             const active = (target === "data") === onDataView;
             return (
@@ -170,7 +170,7 @@ export default function App() {
                 onClick={() => setTab(target)}
                 aria-current={active ? "page" : undefined}
                 className={`h-10 rounded-lg px-4 text-sm font-semibold transition ${
-                  active ? "bg-sky-500/90 text-white" : "text-slate-300 hover:bg-white/10"
+                  active ? "bg-sky-500/90 text-white" : "text-slate-300 hover:bg-line"
                 }`}
               >
                 {label}

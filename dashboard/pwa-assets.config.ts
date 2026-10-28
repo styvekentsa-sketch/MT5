@@ -1,7 +1,7 @@
 import { defineConfig, minimal2023Preset } from "@vite-pwa/assets-generator/config";
 
 // Génère les icônes PWA depuis public/logo.svg : `npm run generate-pwa-assets`
-const DARK_BACKGROUND = "#020617";
+const DARK_BACKGROUND = "#0b0d10";
 
 export default defineConfig({
   headLinkOptions: { preset: "2023" },

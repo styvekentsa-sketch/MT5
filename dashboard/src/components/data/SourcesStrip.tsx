@@ -5,7 +5,7 @@ import { Skeleton } from "../ui/GlassCard";
 
 const STATUS: Record<FeedStatus, { label: string; dot: string; text: string }> = {
   ok: { label: "OK", dot: "bg-emerald-400", text: "text-emerald-300" },
-  error: { label: "Erreur", dot: "bg-rose-500 animate-pulse", text: "text-rose-300" },
+  error: { label: "Erreur", dot: "bg-rose-500", text: "text-rose-300" },
   pending: { label: "En attente", dot: "bg-slate-400", text: "text-slate-300" },
   disabled: { label: "Désactivé", dot: "bg-slate-600", text: "text-slate-500" },
 };
@@ -18,7 +18,7 @@ export function SourcesStrip({ sources }: { sources: FeedSource[] | null }) {
     return (
       <div className="flex gap-3 overflow-hidden">
         {Array.from({ length: 3 }, (_, i) => (
-          <Skeleton key={i} className="h-24 w-64 shrink-0 rounded-2xl" />
+          <Skeleton key={i} className="h-24 w-64 shrink-0 rounded-md" />
         ))}
       </div>
     );
@@ -35,7 +35,7 @@ export function SourcesStrip({ sources }: { sources: FeedSource[] | null }) {
         return (
           <li
             key={`${source.kind}-${source.url ?? source.name}`}
-            className="w-64 shrink-0 snap-start rounded-2xl border border-white/10 bg-white/4 p-4 backdrop-blur-xl lg:w-auto"
+            className="w-64 shrink-0 snap-start rounded-md border border-line bg-surface p-4 lg:w-auto"
             title={source.url ?? undefined}
           >
             <div className="flex items-center justify-between gap-2">
