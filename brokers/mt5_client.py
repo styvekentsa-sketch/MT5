@@ -12,7 +12,7 @@ unique (`_lock`). Chaque fonction publique vérifie la connexion avant d'agir et
 tente une reconnexion si le terminal a été perdu.
 
 Usage :
-    from mt5_connector import connect_mt5, get_historical_data, execute_order, shutdown_mt5
+    from brokers.mt5_client import connect_mt5, get_historical_data, execute_order, shutdown_mt5
 
     if connect_mt5():
         df = get_historical_data("EURUSD", count=200)
@@ -28,14 +28,15 @@ import math
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Literal, TypeVar
 
 import MetaTrader5 as mt5
 import pandas as pd
 
-from config import get_logger, settings
+from config import settings
+from utils.logger import get_logger
 
 log = get_logger(__name__)
 
@@ -92,6 +93,7 @@ _SYMBOL_FILLING_IOC = 2
 _lock = threading.RLock()
 _connected = False
 _dry_run_tickets = itertools.count(-1, -1)   # tickets fictifs négatifs : jamais confondus avec des vrais
+_dry_run = settings.dry_run                 # modifiable à chaud via set_dry_run() (API de contrôle)
 
 
 # =============================================================================
@@ -138,6 +140,30 @@ class OrderResult:
     retcode: int = 0
     message: str = ""
     dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class SymbolSpecs:
+    symbol: str
+    digits: int
+    point: float
+    tick_size: float
+    tick_value: float                # valeur d'un tick pour 1 lot, en devise du compte
+    volume_min: float
+    volume_max: float
+    volume_step: float
+    stops_level: int                 # distance minimale SL/TP - prix, en points
+    freeze_level: int                # zone de gel autour du prix, en points
+    trade_allowed: bool
+
+
+@dataclass(frozen=True)
+class ClosedDeal:
+    ticket: int
+    symbol: str
+    time: datetime
+    net_profit: float                # profit + commission + swap + frais
+    magic: int
 
 
 # =============================================================================
@@ -268,7 +294,7 @@ def _verify_session() -> bool:
         log.warning("Algo Trading désactivé dans le terminal : les ordres réels seront refusés")
     if not account.trade_allowed:
         log.warning("Le trading n'est pas autorisé sur ce compte")
-    if account.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL and not settings.dry_run:
+    if account.trade_mode == mt5.ACCOUNT_TRADE_MODE_REAL and not is_dry_run():
         log.warning("ATTENTION : COMPTE RÉEL en mode LIVE, les ordres engagent de l'argent réel")
     return True
 
@@ -319,6 +345,24 @@ def shutdown_mt5() -> None:
         mt5.shutdown()
         _connected = False
     log.info("Connexion MT5 fermée")
+
+
+def is_dry_run() -> bool:
+    """True en mode PAPER (ordres simulés), False en mode LIVE."""
+    return _dry_run
+
+
+def set_dry_run(enabled: bool) -> None:
+    """Bascule à chaud entre PAPER (True) et LIVE (False) ; effectif dès l'ordre suivant."""
+    global _dry_run
+    with _lock:
+        if enabled == _dry_run:
+            return
+        _dry_run = enabled
+    if enabled:
+        log.warning("Mode PAPER activé : les ordres sont désormais simulés")
+    else:
+        log.warning("Mode LIVE activé : les ordres seront ENVOYÉS au broker")
 
 
 def is_connected() -> bool:
@@ -431,6 +475,83 @@ def get_open_positions(symbol: str | None = None, bot_only: bool = True) -> list
     return list(positions)
 
 
+@_requires_connection
+def get_closed_deals(since: datetime, bot_only: bool = False) -> list[ClosedDeal]:
+    """
+    Transactions de clôture (sorties de position) depuis `since`, de la plus ancienne
+    à la plus récente. Les dépôts/retraits et les entrées en position sont exclus.
+    """
+    # `date_to` dans le futur : l'heure serveur du broker est souvent en avance sur UTC
+    deals = mt5.history_deals_get(since, datetime.now(timezone.utc) + timedelta(days=1))
+    if deals is None:
+        log.error("history_deals_get() a échoué : %s", _last_error())
+        return []
+
+    closing_entries = {mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_INOUT, mt5.DEAL_ENTRY_OUT_BY}
+    result = [
+        ClosedDeal(
+            ticket=d.ticket,
+            symbol=d.symbol,
+            time=datetime.fromtimestamp(d.time, tz=timezone.utc),
+            net_profit=d.profit + d.commission + d.swap + getattr(d, "fee", 0.0),
+            magic=d.magic,
+        )
+        for d in deals
+        if d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL) and d.entry in closing_entries
+        and (not bot_only or d.magic == settings.trading.magic_number)
+    ]
+    return sorted(result, key=lambda d: d.time)
+
+
+# =============================================================================
+#  Spécifications symbole & calculs broker
+# =============================================================================
+
+@_requires_connection
+def get_symbol_specs(symbol: str) -> SymbolSpecs | None:
+    """Contraintes de trading du symbole (volumes, stops, valeur du tick), ou None."""
+    try:
+        info = _ensure_symbol(symbol)
+    except ValueError as exc:
+        log.error("%s", exc)
+        return None
+    return SymbolSpecs(
+        symbol=symbol,
+        digits=info.digits,
+        point=info.point,
+        tick_size=info.trade_tick_size,
+        tick_value=info.trade_tick_value,
+        volume_min=info.volume_min,
+        volume_max=info.volume_max,
+        volume_step=info.volume_step,
+        stops_level=info.trade_stops_level,
+        freeze_level=info.trade_freeze_level,
+        trade_allowed=info.trade_mode != mt5.SYMBOL_TRADE_MODE_DISABLED,
+    )
+
+
+def _order_type(side: str) -> int:
+    return mt5.ORDER_TYPE_BUY if side.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+
+
+@_requires_connection
+def calc_profit(side: str, symbol: str, volume: float, price_open: float, price_close: float) -> float | None:
+    """Profit (négatif = perte) en devise du compte, conversions de devises incluses ; None si échec."""
+    profit = mt5.order_calc_profit(_order_type(side), symbol, volume, price_open, price_close)
+    if profit is None:
+        log.warning("order_calc_profit(%s) a échoué : %s", symbol, _last_error())
+    return profit
+
+
+@_requires_connection
+def calc_margin(side: str, symbol: str, volume: float, price: float) -> float | None:
+    """Marge requise en devise du compte pour ouvrir la position ; None si échec."""
+    margin = mt5.order_calc_margin(_order_type(side), symbol, volume, price)
+    if margin is None:
+        log.warning("order_calc_margin(%s) a échoué : %s", symbol, _last_error())
+    return margin
+
+
 # =============================================================================
 #  Exécution des ordres
 # =============================================================================
@@ -518,7 +639,7 @@ def execute_order(
             sl, tp = _validate_stops(info, side, tick, sl, tp)  # type: ignore[arg-type]
             price = tick.ask if side == "BUY" else tick.bid
 
-            if settings.dry_run:
+            if is_dry_run():
                 ticket = next(_dry_run_tickets)
                 log.info("[DRY RUN] %s %.2f %s @ %s | SL %s | TP %s | ticket fictif #%d | %s",
                          side, lots, symbol, price, sl, tp, ticket, comment)
@@ -548,14 +669,17 @@ def execute_order(
         return OrderResult(False, symbol, side, volume, sl=sl, tp=tp, message=str(exc))
 
 
-def close_position(ticket: int, comment: str = "Bot Close") -> OrderResult:
-    """Clôture entièrement une position ouverte par son ticket."""
+def close_position(ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
+    """
+    Clôture entièrement une position ouverte par son ticket.
+    `force=True` envoie une clôture réelle même en mode PAPER (kill-switch d'urgence).
+    """
     try:
         with _lock:
             ensure_connection()
             positions = mt5.positions_get(ticket=ticket)
             if not positions:
-                if settings.dry_run and ticket < 0:
+                if is_dry_run() and ticket < 0:
                     log.info("[DRY RUN] Clôture simulée de la position fictive #%d", ticket)
                     return OrderResult(True, "", "CLOSE", 0.0, ticket=ticket,
                                        message="simulation", dry_run=True)
@@ -571,7 +695,7 @@ def close_position(ticket: int, comment: str = "Bot Close") -> OrderResult:
             side = "SELL" if is_buy else "BUY"
             price = tick.bid if is_buy else tick.ask
 
-            if settings.dry_run:
+            if is_dry_run() and not force:
                 log.info("[DRY RUN] Clôture simulée #%d : %s %.2f %s @ %s (P/L actuel %.2f)",
                          ticket, side, pos.volume, pos.symbol, price, pos.profit)
                 return OrderResult(True, pos.symbol, side, pos.volume, price, ticket=ticket,
@@ -600,14 +724,14 @@ def close_position(ticket: int, comment: str = "Bot Close") -> OrderResult:
 
 
 if __name__ == "__main__":
-    # `python mt5_connector.py` : test rapide de la connexion et des données
+    # `python -m brokers.mt5_client` : test rapide de la connexion et des données
     if connect_mt5():
         try:
             log.info("Compte : %s", get_account_info())
             first = settings.trading.symbols[0]
             log.info("Tick %s : %s", first, get_current_tick(first))
             log.info("Dernières bougies %s :\n%s", first, get_historical_data(first, count=5))
-            if settings.dry_run:
+            if is_dry_run():
                 execute_order(first, "BUY", settings.risk.min_lot, comment="Test DRY RUN")
         finally:
             shutdown_mt5()
