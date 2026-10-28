@@ -73,7 +73,10 @@ function Set-EnvValues([string]$Path, [hashtable]$Updates) {
 }
 
 function Find-Mt5Terminal {
-    $candidates = @(
+    # Terminal en cours d'exécution (quel que soit son dossier), puis emplacements usuels de chaque lecteur
+    $running = @(Get-Process terminal64 -ErrorAction SilentlyContinue | ForEach-Object { $_.Path })
+    $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Used } | ForEach-Object { $_.Root }
+    $candidates = $running + @($drives | ForEach-Object { Join-Path $_ "MetaTrader 5\terminal64.exe" }) + @(
         "$env:ProgramFiles\MetaTrader 5\terminal64.exe",
         "${env:ProgramFiles(x86)}\MetaTrader 5\terminal64.exe"
     ) + @(Get-ChildItem $env:ProgramFiles, ${env:ProgramFiles(x86)} -Filter terminal64.exe -Recurse -Depth 2 `
@@ -144,12 +147,21 @@ $needsCredentials = ($current["MT5_ACCOUNT"] -in @("", $PlaceholderAccount, $nul
                     ($current["MT5_PASSWORD"] -in @("", $PlaceholderPassword, $null))
 if ($needsCredentials -and -not $SkipCredentials) {
     Write-Host "`n    Identifiants du compte MetaTrader 5 (de préférence un compte DÉMO) :" -ForegroundColor White
-    do { $account = Read-Host "    Numéro de compte" } until ($account -match '^\d+$')
-    $server = Read-Host "    Serveur (nom exact affiché dans MT5, ex : MetaQuotes-Demo)"
-    $secure = Read-Host "    Mot de passe (masqué)" -AsSecureString
+    # Valeurs déjà renseignées proposées par défaut (Entrée = conserver)
+    $knownAccount = if ($current["MT5_ACCOUNT"] -ne $PlaceholderAccount) { $current["MT5_ACCOUNT"] } else { "" }
+    do {
+        $account = Read-Host "    Numéro de compte [$knownAccount]"
+        if (-not $account.Trim()) { $account = $knownAccount }
+    } until ($account -match '^\d+$')
+    $server = Read-Host "    Serveur [$($current["MT5_SERVER"])]"
+    if (-not $server.Trim()) { $server = $current["MT5_SERVER"] }
+    do {
+        $secure = Read-Host "    Mot de passe principal (masqué)" -AsSecureString
+        $password = [System.Net.NetworkCredential]::new("", $secure).Password
+    } until ($password)
     $updates["MT5_ACCOUNT"] = $account
     $updates["MT5_SERVER"] = $server.Trim()
-    $updates["MT5_PASSWORD"] = [System.Net.NetworkCredential]::new("", $secure).Password
+    $updates["MT5_PASSWORD"] = $password
     $symbols = Read-Host "    Symboles à trader [$($current["TRADING_SYMBOLS"])] (Entrée = conserver)"
     if ($symbols.Trim()) { $updates["TRADING_SYMBOLS"] = ($symbols -replace '\s', '') }
 } elseif ($needsCredentials) {
