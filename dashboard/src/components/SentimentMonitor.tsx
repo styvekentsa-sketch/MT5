@@ -24,7 +24,7 @@ function LabelBadge({ label, score }: { label: SentimentLabel; score?: number })
 function ScoreGauge({ score }: { score: number }) {
   const position = ((Math.max(-1, Math.min(1, score)) + 1) / 2) * 100;
   return (
-    <div className="relative h-2 rounded-full bg-gradient-to-r from-rose-500/70 via-slate-600/60 to-emerald-500/70">
+    <div className="relative h-2 rounded-full bg-linear-to-r from-rose-500/70 via-slate-600/60 to-emerald-500/70">
       <div
         className="absolute top-1/2 size-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-slate-950 bg-white shadow-lg transition-[left] duration-700"
         style={{ left: `${position}%` }}
@@ -102,7 +102,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
           {sentiment.articles.length === 0 ? (
             <p className="px-5 py-10 text-center text-sm text-slate-400">Aucune actualité récente.</p>
           ) : (
-            <ul className="max-h-[32rem] divide-y divide-white/5 overflow-y-auto">
+            <ul className="divide-y divide-white/5 lg:max-h-[32rem] lg:overflow-y-auto lg:overscroll-contain">
               {sentiment.articles.map((article) => (
                 <li key={article.link} className="px-5 py-3 transition hover:bg-white/[0.03]">
                   <div className="flex items-start justify-between gap-3">

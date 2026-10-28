@@ -15,14 +15,16 @@ interface MetricCardProps {
 function MetricCard({ label, icon, value, sub, accent = "from-sky-500/20" }: MetricCardProps) {
   return (
     <div
-      className={`relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br ${accent} to-white/[0.02] p-5 backdrop-blur-xl`}
+      className={`relative min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-linear-to-br ${accent} to-white/[0.02] p-4 backdrop-blur-xl sm:p-5`}
     >
-      <div className="flex items-center justify-between text-xs font-medium tracking-wide text-slate-400 uppercase">
-        {label}
-        <span className="text-slate-500">{icon}</span>
+      <div className="flex items-center justify-between gap-2 text-[11px] font-medium tracking-wide text-slate-400 uppercase sm:text-xs">
+        <span className="truncate">{label}</span>
+        <span className="shrink-0 text-slate-500">{icon}</span>
       </div>
-      <div className="mt-3 font-mono text-2xl font-semibold text-white tabular-nums">{value}</div>
-      {sub && <div className="mt-1 text-xs text-slate-400 tabular-nums">{sub}</div>}
+      <div className="mt-2 font-mono text-lg font-semibold break-words text-white tabular-nums sm:mt-3 sm:text-2xl">
+        {value}
+      </div>
+      {sub && <div className="mt-1 text-[11px] text-slate-400 tabular-nums sm:text-xs">{sub}</div>}
     </div>
   );
 }
@@ -31,7 +33,7 @@ function MetricCard({ label, icon, value, sub, accent = "from-sky-500/20" }: Met
 export function AccountOverview({ account }: { account: Account | null }) {
   if (!account) {
     return (
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
         {Array.from({ length: 4 }, (_, i) => (
           <div key={i} className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
             <Skeleton className="h-3 w-24" />
@@ -48,7 +50,7 @@ export function AccountOverview({ account }: { account: Account | null }) {
   const dailyUp = account.daily_pl >= 0;
 
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
       <MetricCard
         label="Solde"
         icon={<Landmark className="size-4" />}

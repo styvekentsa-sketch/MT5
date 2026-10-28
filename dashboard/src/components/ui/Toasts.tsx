@@ -9,7 +9,7 @@ const STYLES: Record<ToastTone, { className: string; Icon: typeof Info }> = {
 
 export function Toasts({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id: number) => void }) {
   return (
-    <div className="pointer-events-none fixed right-4 bottom-4 z-50 flex w-[calc(100%-2rem)] max-w-sm flex-col gap-2" aria-live="polite">
+    <div className="bottom-mobile-nav pointer-events-none fixed inset-x-4 z-50 flex flex-col gap-2 sm:left-auto sm:w-full sm:max-w-sm lg:bottom-4" aria-live="polite">
       {toasts.map(({ id, tone, message }) => {
         const { className, Icon } = STYLES[tone];
         return (

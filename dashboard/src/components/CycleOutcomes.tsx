@@ -41,7 +41,7 @@ export function CycleOutcomes({ status }: { status: Status | null }) {
                 <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs font-semibold ${style.className}`}>
                   {style.label}
                 </span>
-                <span className="line-clamp-2 text-xs text-slate-400" title={o.detail}>
+                <span className="line-clamp-4 text-xs text-slate-400 lg:line-clamp-2" title={o.detail}>
                   {o.detail}
                 </span>
               </li>

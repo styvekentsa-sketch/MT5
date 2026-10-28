@@ -5,17 +5,59 @@
   --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
 }
 
+/* -------------------------------------------------------------------------
+   Safe areas (encoche, Dynamic Island, barre gestuelle iOS / Android).
+   Actives grâce à `viewport-fit=cover` dans index.html ; valent 0 ailleurs.
+   ------------------------------------------------------------------------- */
+@utility pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility pb-safe {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Marges latérales : 1rem minimum, davantage en paysage sous l'encoche */
+@utility px-safe {
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
+/* Espace réservé sous le contenu pour la barre de navigation mobile (3.5rem + marge) */
+@utility pb-mobile-nav {
+  padding-bottom: calc(5.5rem + env(safe-area-inset-bottom));
+}
+
+@utility bottom-mobile-nav {
+  bottom: calc(5rem + env(safe-area-inset-bottom));
+}
+
+@utility pb-sheet {
+  padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+}
+
 html {
   color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
-  @apply bg-slate-950 antialiased;
+  @apply min-h-dvh bg-slate-950 antialiased;
   background-image:
     radial-gradient(60rem 40rem at 10% -10%, rgb(14 165 233 / 0.14), transparent 60%),
     radial-gradient(50rem 35rem at 100% 0%, rgb(99 102 241 / 0.12), transparent 60%),
     radial-gradient(40rem 30rem at 50% 110%, rgb(16 185 129 / 0.08), transparent 60%);
   background-attachment: fixed;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Tactile : pas de délai de double-tap sur les contrôles */
+button,
+a,
+input,
+label {
+  touch-action: manipulation;
 }
 
 /* Barres de défilement discrètes (listes d'actualités, tableaux) */

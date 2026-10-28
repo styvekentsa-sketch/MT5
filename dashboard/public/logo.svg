@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <!-- Bougies : baissière, haussière, haussière -->
+  <g stroke="#ffffff" stroke-width="14" stroke-linecap="round">
+    <line x1="166" y1="150" x2="166" y2="360"/>
+    <line x1="256" y1="120" x2="256" y2="330"/>
+    <line x1="346" y1="96" x2="346" y2="290"/>
+  </g>
+  <rect x="136" y="200" width="60" height="110" rx="10" fill="#fda4af"/>
+  <rect x="226" y="170" width="60" height="120" rx="10" fill="#ffffff"/>
+  <rect x="316" y="132" width="60" height="120" rx="10" fill="#6ee7b7"/>
+  <path d="M120 400 L210 350 L290 372 L392 300" fill="none" stroke="#ffffff" stroke-opacity="0.85"
+        stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

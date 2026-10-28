@@ -9,15 +9,44 @@ import type {
   Status,
 } from "./types";
 
-export const API_URL = (import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
+/** Paramètres de connexion à l'API du bot (modifiables dans l'application). */
+export interface Connection {
+  baseUrl: string;
+  apiKey: string;
+}
 
+const API_PORT = 8000;
 const DEFAULT_TIMEOUT_MS = 8_000;
 // Le premier appel peut télécharger tous les flux RSS côté serveur
 const SENTIMENT_TIMEOUT_MS = 60_000;
 const SENTIMENT_ARTICLE_LIMIT = 30;
 
+/** Supprime les « / » finaux ; retourne "" si l'URL n'est pas en http(s). */
+export function normalizeBaseUrl(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, "");
+  try {
+    const { protocol } = new URL(trimmed);
+    return protocol === "http:" || protocol === "https:" ? trimmed : "";
+  } catch {
+    return "";
+  }
+}
+
 /**
- * network      : API injoignable (bot arrêté, mauvaise URL, délai dépassé)
+ * URL par défaut : VITE_API_BASE_URL (build), sinon même hôte que la page sur le port 8000.
+ * Un téléphone qui ouvre http://192.168.1.20:5173 vise ainsi http://192.168.1.20:8000.
+ */
+export const DEFAULT_API_URL =
+  normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? "") ||
+  `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
+
+/** Une page HTTPS ne peut pas appeler une API en HTTP (contenu mixte bloqué par le navigateur). */
+export function isMixedContent(baseUrl: string): boolean {
+  return window.location.protocol === "https:" && baseUrl.startsWith("http:");
+}
+
+/**
+ * network      : API injoignable (bot arrêté, mauvaise URL, délai dépassé, hors ligne)
  * unauthorized : clé API absente ou invalide (401)
  * unavailable  : API joignable mais MT5 ou une donnée indisponible (503)
  * http         : autre erreur HTTP
@@ -62,7 +91,14 @@ function errorKind(status: number): ApiErrorKind {
   return "http";
 }
 
-async function request<T>(path: string, apiKey: string, options: RequestOptions = {}): Promise<T> {
+function networkErrorMessage(baseUrl: string, timedOut: boolean): string {
+  if (timedOut) return "Délai de réponse dépassé";
+  if (!navigator.onLine) return "Appareil hors ligne";
+  if (isMixedContent(baseUrl)) return `Page en HTTPS : le navigateur bloque l'API en HTTP (${baseUrl})`;
+  return `API déconnectée : impossible de joindre ${baseUrl}`;
+}
+
+async function request<T>(conn: Connection, path: string, options: RequestOptions = {}): Promise<T> {
   const { method = "GET", body, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -71,22 +107,19 @@ async function request<T>(path: string, apiKey: string, options: RequestOptions 
 
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    response = await fetch(`${conn.baseUrl}${path}`, {
       method,
       headers: {
-        "X-API-Key": apiKey,
+        "X-API-Key": conn.apiKey,
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
+      cache: "no-store",
     });
   } catch (error) {
     if (signal?.aborted) throw error; // annulation volontaire (démontage du composant)
-    const timedOut = controller.signal.aborted;
-    throw new ApiError(
-      timedOut ? "Délai de réponse dépassé" : `API déconnectée : impossible de joindre ${API_URL}`,
-      "network",
-    );
+    throw new ApiError(networkErrorMessage(conn.baseUrl, controller.signal.aborted), "network");
   } finally {
     window.clearTimeout(timer);
     signal?.removeEventListener("abort", onExternalAbort);
@@ -99,30 +132,30 @@ async function request<T>(path: string, apiKey: string, options: RequestOptions 
 }
 
 export const api = {
-  status: (key: string, signal?: AbortSignal) => request<Status>("/api/status", key, { signal }),
-  account: (key: string, signal?: AbortSignal) => request<Account>("/api/account", key, { signal }),
-  positions: (key: string, signal?: AbortSignal) => request<Position[]>("/api/positions", key, { signal }),
-  sentiment: (key: string, signal?: AbortSignal) =>
-    request<Sentiment>(`/api/sentiment?limit=${SENTIMENT_ARTICLE_LIMIT}`, key, {
+  status: (c: Connection, signal?: AbortSignal) => request<Status>(c, "/api/status", { signal }),
+  account: (c: Connection, signal?: AbortSignal) => request<Account>(c, "/api/account", { signal }),
+  positions: (c: Connection, signal?: AbortSignal) => request<Position[]>(c, "/api/positions", { signal }),
+  sentiment: (c: Connection, signal?: AbortSignal) =>
+    request<Sentiment>(c, `/api/sentiment?limit=${SENTIMENT_ARTICLE_LIMIT}`, {
       signal,
       timeoutMs: SENTIMENT_TIMEOUT_MS,
     }),
 
-  start: (key: string) => request<ControlResult>("/api/control/start", key, { method: "POST" }),
-  stop: (key: string) => request<ControlResult>("/api/control/stop", key, { method: "POST" }),
-  killSwitch: (key: string, includeManual: boolean) =>
-    request<KillSwitchResult>("/api/control/kill-switch", key, {
+  start: (c: Connection) => request<ControlResult>(c, "/api/control/start", { method: "POST" }),
+  stop: (c: Connection) => request<ControlResult>(c, "/api/control/stop", { method: "POST" }),
+  killSwitch: (c: Connection, includeManual: boolean) =>
+    request<KillSwitchResult>(c, "/api/control/kill-switch", {
       method: "POST",
       body: { include_manual: includeManual, pause_engine: true },
       timeoutMs: 30_000,
     }),
-  setMode: (key: string, live: boolean) =>
-    request<ModeResult>("/api/control/mode", key, {
+  setMode: (c: Connection, live: boolean) =>
+    request<ModeResult>(c, "/api/control/mode", {
       method: "POST",
       body: live ? { dry_run: false, confirm: "LIVE" } : { dry_run: true },
     }),
-  closePosition: (key: string, ticket: number) =>
-    request<ClosedPosition>(`/api/control/positions/${ticket}/close`, key, { method: "POST" }),
+  closePosition: (c: Connection, ticket: number) =>
+    request<ClosedPosition>(c, `/api/control/positions/${ticket}/close`, { method: "POST" }),
 };
 
 export function errorMessage(error: unknown): string {

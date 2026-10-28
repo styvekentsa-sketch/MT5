@@ -81,8 +81,8 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs tracking-wide text-slate-400 uppercase">
-                  {["Ticket", "Symbole", "Type", "Volume", "Entrée", "Actuel", "SL", "TP", "P/L", ""].map((h) => (
-                    <th key={h} className="px-4 py-3 font-medium">
+                  {["Position", "Volume", "Entrée / Actuel", "SL / TP", "P/L", ""].map((h) => (
+                    <th key={h} className="px-4 py-3 font-medium whitespace-nowrap">
                       {h}
                     </th>
                   ))}
@@ -90,22 +90,26 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
               </thead>
               <tbody className="divide-y divide-white/5 font-mono tabular-nums">
                 {positions.map((p) => (
-                  <tr key={p.ticket} className="transition hover:bg-white/[0.03]">
-                    <td className="px-4 py-3 text-slate-400">
-                      <span className="inline-flex items-center gap-1.5">
-                        <OriginIcon isBot={p.is_bot} />#{p.ticket}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 font-sans font-semibold text-white">{p.symbol}</td>
+                  <tr key={p.ticket} className="transition hover:bg-white/3">
                     <td className="px-4 py-3">
-                      <TypeBadge type={p.type} />
+                      <div className="flex items-center gap-2 font-sans">
+                        <span className="font-semibold text-white">{p.symbol}</span>
+                        <TypeBadge type={p.type} />
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500">
+                        <OriginIcon isBot={p.is_bot} />#{p.ticket}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-slate-200">{formatNumber(p.volume, 2)}</td>
-                    <td className="px-4 py-3 text-slate-200">{price(p.price_open)}</td>
-                    <td className="px-4 py-3 text-slate-200">{price(p.price_current)}</td>
-                    <td className="px-4 py-3 text-rose-300/80">{price(p.sl)}</td>
-                    <td className="px-4 py-3 text-emerald-300/80">{price(p.tp)}</td>
-                    <td className={`px-4 py-3 font-semibold ${signColor(p.profit)}`}>{money(p.profit)}</td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <div className="text-slate-200">{price(p.price_open)}</div>
+                      <div className="text-xs text-slate-400">{price(p.price_current)}</div>
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <div className="text-rose-300/80">{price(p.sl)}</div>
+                      <div className="text-xs text-emerald-300/80">{price(p.tp)}</div>
+                    </td>
+                    <td className={`px-4 py-3 font-semibold whitespace-nowrap ${signColor(p.profit)}`}>{money(p.profit)}</td>
                     <td className="px-4 py-3 text-right">
                       <Button size="sm" disabled={disabled} onClick={() => setPending(p)} icon={<X className="size-3.5" />}>
                         Fermer
@@ -121,8 +125,8 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
           <ul className="divide-y divide-white/5 md:hidden">
             {positions.map((p) => (
               <li key={p.ticket} className="space-y-2 px-4 py-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <OriginIcon isBot={p.is_bot} />
                     <span className="font-semibold text-white">{p.symbol}</span>
                     <TypeBadge type={p.type} />
@@ -140,7 +144,7 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
                   <span>
                     #{p.ticket} · {timeAgo(p.opened_at)}
                   </span>
-                  <Button size="sm" disabled={disabled} onClick={() => setPending(p)} icon={<X className="size-3.5" />}>
+                  <Button size="md" disabled={disabled} onClick={() => setPending(p)} icon={<X className="size-4" />}>
                     Fermer
                   </Button>
                 </div>

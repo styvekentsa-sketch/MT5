@@ -85,6 +85,9 @@ def setup_logging(log_cfg: LogConfig | None = None) -> None:
 
         if sys.platform == "win32":
             os.system("")  # active le support des séquences ANSI dans la console Windows
+        # Sortie redirigée (pipe, service) : Windows utiliserait cp1252 et casserait les accents
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
         root = logging.getLogger()
         root.setLevel(level)

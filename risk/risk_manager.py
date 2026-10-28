@@ -52,6 +52,7 @@ MIN_REWARD_RISK = 1.0                # le TP doit être au moins aussi loin que 
 RISK_TOLERANCE = 1.05                # perte au SL tolérée jusqu'à 105 % du budget (arrondis broker)
 MAX_MARGIN_USAGE = 0.90              # marge requise <= 90 % de la marge libre
 VOLUME_EPSILON = 1e-9
+VOLUME_DECIMALS = 8                  # absorbe les erreurs d'arrondi flottant avant l'arrondi au pas
 
 
 # =============================================================================
@@ -72,9 +73,14 @@ def _risk_budget(account: AccountInfo) -> float:
 
 
 def _floor_to_step(volume: float, step: float) -> float:
-    """Arrondit vers le bas au pas de volume du broker (Decimal : pas d'erreur de flottant)."""
+    """
+    Arrondit vers le bas au pas de volume du broker (Decimal : pas d'erreur de flottant).
+    Le volume est d'abord arrondi à VOLUME_DECIMALS : sans cela, 100 / 200.00000000000017
+    (= 0.4999999999999996) tomberait à 0.49 au lieu de 0.50.
+    """
     d_step = Decimal(str(step))
-    return float((Decimal(str(volume)) / d_step).to_integral_value(rounding=ROUND_FLOOR) * d_step)
+    d_volume = Decimal(str(round(volume, VOLUME_DECIMALS)))
+    return float((d_volume / d_step).to_integral_value(rounding=ROUND_FLOOR) * d_step)
 
 
 def _volume_bounds(specs: SymbolSpecs) -> tuple[float, float]:

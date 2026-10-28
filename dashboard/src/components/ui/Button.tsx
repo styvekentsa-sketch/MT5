@@ -13,10 +13,11 @@ const VARIANTS: Record<Variant, string> = {
     "bg-rose-600 text-white shadow-lg shadow-rose-900/40 hover:bg-rose-500 focus-visible:ring-rose-400",
 };
 
+// md = 44 px (minimum tactile recommandé), lg = 48 px (actions critiques : kill switch, start/stop)
 const SIZES: Record<Size, string> = {
-  sm: "h-8 gap-1.5 px-3 text-xs",
-  md: "h-10 gap-2 px-4 text-sm",
-  lg: "h-11 gap-2 px-5 text-sm",
+  sm: "h-9 gap-1.5 px-3 text-xs",
+  md: "h-11 gap-2 px-4 text-sm",
+  lg: "h-12 gap-2 px-5 text-sm",
 };
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
