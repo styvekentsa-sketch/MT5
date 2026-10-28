@@ -29,3 +29,7 @@ vaderSentiment>=3.3.2       # Moteur léger par défaut (aucun GPU requis)
 # transformers>=4.40.0      # SENTIMENT_ENGINE=finbert (modèle ProsusAI/finbert)
 # torch>=2.2.0              #   -> requis par transformers
 # anthropic>=0.40.0         # SENTIMENT_ENGINE=llm (analyse par Claude)
+
+# --- API du dashboard ---
+fastapi>=0.110.0
+uvicorn>=0.29.0
