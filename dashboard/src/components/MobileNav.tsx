@@ -1,12 +1,13 @@
-import { CandlestickChart, ListChecks, Newspaper, Wallet } from "lucide-react";
+import { CandlestickChart, DatabaseZap, ListChecks, Newspaper, Wallet } from "lucide-react";
 
-export type Tab = "account" | "positions" | "news" | "engine";
+export type Tab = "account" | "positions" | "news" | "engine" | "data";
 
 const TABS: { id: Tab; label: string; Icon: typeof Wallet }[] = [
   { id: "account", label: "Compte", Icon: Wallet },
   { id: "positions", label: "Positions", Icon: CandlestickChart },
   { id: "news", label: "Actualités", Icon: Newspaper },
   { id: "engine", label: "Moteur", Icon: ListChecks },
+  { id: "data", label: "Données", Icon: DatabaseZap },
 ];
 
 interface MobileNavProps {
@@ -22,7 +23,7 @@ export function MobileNav({ active, positionCount, onChange }: MobileNavProps) {
       className="pb-safe fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-slate-950/85 backdrop-blur-xl lg:hidden"
       aria-label="Navigation principale"
     >
-      <ul className="mx-auto grid max-w-lg grid-cols-4">
+      <ul className="mx-auto grid max-w-lg grid-cols-5">
         {TABS.map(({ id, label, Icon }) => {
           const selected = id === active;
           return (
@@ -31,7 +32,7 @@ export function MobileNav({ active, positionCount, onChange }: MobileNavProps) {
                 type="button"
                 onClick={() => onChange(id)}
                 aria-current={selected ? "page" : undefined}
-                className={`relative flex min-h-14 w-full flex-col items-center justify-center gap-1 text-[11px] font-medium transition ${
+                className={`relative flex min-h-14 w-full flex-col items-center justify-center gap-1 text-[10px] font-medium transition sm:text-[11px] ${
                   selected ? "text-sky-300" : "text-slate-400 active:text-slate-200"
                 }`}
               >

@@ -4,6 +4,7 @@ import { AccountOverview } from "./components/AccountOverview";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { ControlPanel } from "./components/ControlPanel";
 import { CycleOutcomes } from "./components/CycleOutcomes";
+import { DataFeedsPage } from "./components/data/DataFeedsPage";
 import { MobileNav, type Tab } from "./components/MobileNav";
 import { PositionsTable } from "./components/PositionsTable";
 import { SentimentMonitor } from "./components/SentimentMonitor";
@@ -17,6 +18,14 @@ import { useToasts } from "./hooks/useToasts";
 const LIVE_POLL_MS = 2_500;
 // Les actualités sont rafraîchies côté bot toutes les NEWS_REFRESH_INTERVAL_SECONDS (300 s par défaut)
 const SENTIMENT_POLL_MS = 60_000;
+// Page « Données » : interrogée uniquement quand elle est affichée
+const DATA_FEEDS_POLL_MS = 30_000;
+const WEBHOOKS_POLL_MS = 5_000;
+
+const VIEW_TABS = [
+  { label: "Trading", tab: "account" },
+  { label: "Données", tab: "data" },
+] as const;
 
 export default function App() {
   const { connection, save, forgetKey } = useConnection();
@@ -46,6 +55,17 @@ export default function App() {
     useCallback((s: AbortSignal) => api.sentiment(connection, s), [connection]),
     SENTIMENT_POLL_MS,
     enabled,
+  );
+  const onDataView = tab === "data";
+  const dataFeeds = usePolling(
+    useCallback((s: AbortSignal) => api.dataFeeds(connection, s), [connection]),
+    DATA_FEEDS_POLL_MS,
+    enabled && onDataView,
+  );
+  const webhookLog = usePolling(
+    useCallback((s: AbortSignal) => api.webhookEvents(connection, s), [connection]),
+    WEBHOOKS_POLL_MS,
+    enabled && onDataView,
   );
 
   const errors = [status.error, account.error, positions.error];
@@ -94,8 +114,11 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  // Mobile : un panneau à la fois (barre de navigation) ; à partir de `lg`, tout est visible.
-  const panel = (id: Tab) => (tab === id ? "" : "hidden lg:block");
+  // Mobile : un panneau à la fois (barre de navigation). À partir de `lg` : vue « Trading »
+  // (tous les panneaux) ou vue « Données », selon les onglets du haut.
+  const panel = (id: Tab) => (tab === id ? "" : onDataView ? "hidden" : "hidden lg:block");
+  const { refresh: refreshDataFeeds } = dataFeeds;
+  const { refresh: refreshWebhooks } = webhookLog;
 
   return (
     <div className="min-h-dvh text-slate-100">
@@ -136,6 +159,38 @@ export default function App() {
 
       <main className="px-safe pb-mobile-nav mx-auto flex max-w-7xl flex-col gap-4 pt-4 lg:gap-6 lg:pt-6 lg:pb-8">
         <ConnectionBanner online={online} baseUrl={connection.baseUrl} error={bannerError} status={status.data} />
+
+        <nav className="hidden gap-1 self-start rounded-xl border border-white/10 bg-white/5 p-1 lg:flex" aria-label="Vues">
+          {VIEW_TABS.map(({ label, tab: target }) => {
+            const active = (target === "data") === onDataView;
+            return (
+              <button
+                key={target}
+                type="button"
+                onClick={() => setTab(target)}
+                aria-current={active ? "page" : undefined}
+                className={`h-10 rounded-lg px-4 text-sm font-semibold transition ${
+                  active ? "bg-sky-500/90 text-white" : "text-slate-300 hover:bg-white/10"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </nav>
+
+        {onDataView && (
+          <DataFeedsPage
+            feeds={dataFeeds.data}
+            webhooks={webhookLog.data}
+            baseUrl={connection.baseUrl}
+            lastUpdated={dataFeeds.lastUpdated}
+            onRefresh={() => {
+              refreshDataFeeds();
+              refreshWebhooks();
+            }}
+          />
+        )}
 
         <div className={panel("account")}>
           <AccountOverview account={account.data} />

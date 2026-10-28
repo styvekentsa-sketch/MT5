@@ -90,9 +90,17 @@ SYMBOL_CURRENCY_HINTS: dict[str, tuple[str, ...]] = {
 
 MAJOR_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNY"}
 
+# Fenêtre de blocage autour d'une annonce à fort impact (partagée par le moteur et le dashboard)
+NEWS_BLOCK_MINUTES_BEFORE = 15
+NEWS_BLOCK_MINUTES_AFTER = 5
+
 _calendar_lock = threading.Lock()
 _calendar_cache: list[EconomicEvent] | None = None
 _calendar_fetched_at = 0.0           # time.monotonic() du dernier téléchargement réussi
+_calendar_fetched_wall: datetime | None = None   # même instant, en heure UTC (affichage)
+
+_feed_lock = threading.Lock()
+_feed_status: dict[str, FeedStatus] = {}         # dernier résultat de téléchargement par flux RSS
 
 
 # =============================================================================
@@ -110,6 +118,15 @@ class EconomicEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class FeedStatus:
+    url: str
+    ok: bool
+    last_fetch: datetime             # UTC
+    article_count: int
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -148,7 +165,7 @@ def _http_get(url: str) -> requests.Response:
     return response
 
 
-def _symbol_currencies(symbol: str) -> set[str]:
+def symbol_currencies(symbol: str) -> set[str]:
     """Devises dont les annonces impactent un symbole (EURUSD -> {EUR, USD}, XAUUSD -> {USD})."""
     sym = symbol.upper()
     for prefix, currencies in SYMBOL_CURRENCY_HINTS.items():
@@ -162,7 +179,7 @@ def get_watched_currencies(symbols: Iterable[str] | None = None) -> set[str]:
     """Devises surveillées, déduites des symboles tradés (par défaut `settings.trading.symbols`)."""
     currencies: set[str] = set()
     for symbol in symbols if symbols is not None else settings.trading.symbols:
-        currencies |= _symbol_currencies(symbol)
+        currencies |= symbol_currencies(symbol)
     return currencies
 
 
@@ -189,7 +206,7 @@ def _load_calendar(force_refresh: bool = False) -> list[EconomicEvent] | None:
     En cas d'échec réseau, retourne le dernier cache connu (même périmé) ;
     None uniquement si aucune donnée n'a jamais pu être récupérée.
     """
-    global _calendar_cache, _calendar_fetched_at
+    global _calendar_cache, _calendar_fetched_at, _calendar_fetched_wall
 
     with _calendar_lock:
         fresh = time.monotonic() - _calendar_fetched_at < CALENDAR_CACHE_TTL_SECONDS
@@ -211,6 +228,7 @@ def _load_calendar(force_refresh: bool = False) -> list[EconomicEvent] | None:
         events.sort(key=lambda e: e.time)
         _calendar_cache = events
         _calendar_fetched_at = time.monotonic()
+        _calendar_fetched_wall = datetime.now(timezone.utc)
         log.info("Calendrier économique mis à jour : %d événements cette semaine", len(events))
         return events
 
@@ -249,17 +267,24 @@ def _entry_source(entry: Any, feed: Any, url: str) -> str:
     return urlparse(url).netloc.removeprefix("www.")
 
 
+def _record_feed(url: str, ok: bool, count: int = 0, error: str = "") -> None:
+    with _feed_lock:
+        _feed_status[url] = FeedStatus(url, ok, datetime.now(timezone.utc), count, error)
+
+
 def _fetch_feed(url: str) -> list[NewsArticle]:
-    """Télécharge et parse un flux RSS/Atom ; liste vide en cas d'échec."""
+    """Télécharge et parse un flux RSS/Atom ; liste vide en cas d'échec. Le résultat est tracé par flux."""
     try:
         response = _http_get(url)
     except Exception as exc:  # noqa: BLE001
         log.warning("Flux RSS inaccessible (%s) : %s", url, exc)
+        _record_feed(url, ok=False, error=str(exc))
         return []
 
     parsed = feedparser.parse(response.content)
     if parsed.bozo and not parsed.entries:
         log.warning("Flux RSS illisible (%s) : %s", url, parsed.get("bozo_exception"))
+        _record_feed(url, ok=False, error=f"flux illisible : {parsed.get('bozo_exception')}")
         return []
 
     articles: list[NewsArticle] = []
@@ -277,7 +302,15 @@ def _fetch_feed(url: str) -> list[NewsArticle]:
             snippet=_truncate(_clean_html(summary)),
         ))
     log.debug("Flux %s : %d articles", url, len(articles))
+    _record_feed(url, ok=True, count=len(articles))
     return articles
+
+
+def get_feed_statuses(feeds: Iterable[str] | None = None) -> dict[str, FeedStatus | None]:
+    """Dernier résultat de téléchargement de chaque flux configuré (None = jamais téléchargé)."""
+    urls = list(feeds) if feeds is not None else list(settings.news.rss_feeds)
+    with _feed_lock:
+        return {url: _feed_status.get(url) for url in urls}
 
 
 # =============================================================================
@@ -324,9 +357,51 @@ def get_economic_calendar(
         return []
 
 
+def get_calendar_status() -> dict[str, Any]:
+    """État du calendrier : disponible, dernière mise à jour (UTC), nombre d'événements, URL source."""
+    with _calendar_lock:
+        return {
+            "available": _calendar_cache is not None,
+            "last_fetch": _calendar_fetched_wall,
+            "event_count": len(_calendar_cache or []),
+            "url": CALENDAR_URL,
+            "ttl_seconds": CALENDAR_CACHE_TTL_SECONDS,
+        }
+
+
+def get_upcoming_events(
+    hours_ahead: float = 24,
+    hours_back: float = 2,
+    min_impact: str = "High",
+    currencies: Iterable[str] | None = None,
+) -> list[EconomicEvent]:
+    """
+    Événements de [maintenant - hours_back, maintenant + hours_ahead], triés chronologiquement,
+    filtrés par impact minimal et devises (par défaut celles des paires tradées).
+    Liste vide si le calendrier est indisponible ; ne lève jamais d'exception.
+    """
+    try:
+        events = _load_calendar()
+        if not events:
+            return []
+        threshold = IMPACT_LEVELS.get(min_impact.capitalize(), IMPACT_LEVELS["High"])
+        watched = {c.upper() for c in currencies} if currencies is not None else get_watched_currencies()
+        now = datetime.now(timezone.utc)
+        start, end = now - timedelta(hours=hours_back), now + timedelta(hours=hours_ahead)
+        return [
+            e for e in events
+            if start <= e.time <= end
+            and IMPACT_LEVELS.get(e.impact, 0) >= threshold
+            and (not watched or e.currency in watched)
+        ]
+    except Exception:  # noqa: BLE001
+        log.exception("Erreur inattendue lors de la lecture du calendrier économique")
+        return []
+
+
 def get_upcoming_high_impact_events(
-    minutes_buffer: int = 15,
-    minutes_after: int = 5,
+    minutes_buffer: int = NEWS_BLOCK_MINUTES_BEFORE,
+    minutes_after: int = NEWS_BLOCK_MINUTES_AFTER,
     symbol: str | None = None,
 ) -> list[EconomicEvent] | None:
     """
@@ -340,7 +415,7 @@ def get_upcoming_high_impact_events(
     if events is None:
         return None
 
-    currencies = _symbol_currencies(symbol) if symbol else get_watched_currencies()
+    currencies = symbol_currencies(symbol) if symbol else get_watched_currencies()
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(minutes=minutes_after)
     window_end = now + timedelta(minutes=minutes_buffer)
@@ -353,8 +428,8 @@ def get_upcoming_high_impact_events(
 
 
 def is_high_impact_news_imminent(
-    minutes_buffer: int = 15,
-    minutes_after: int = 5,
+    minutes_buffer: int = NEWS_BLOCK_MINUTES_BEFORE,
+    minutes_after: int = NEWS_BLOCK_MINUTES_AFTER,
     symbol: str | None = None,
     block_if_unavailable: bool = True,
 ) -> bool:

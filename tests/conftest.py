@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 TEST_API_KEY = "test-api-key-0123456789"
+TEST_WEBHOOK_SECRET = "test-webhook-secret-987654"
 
 os.environ.update({
     "DRY_RUN": "true",
@@ -31,6 +32,7 @@ os.environ.update({
     "SENTIMENT_ENGINE": "vader",
     "API_ENABLED": "false",
     "API_KEY": TEST_API_KEY,
+    "WEBHOOK_SECRET": TEST_WEBHOOK_SECRET,
     "LOG_LEVEL": "WARNING",
     "LOG_DIR": str(Path(tempfile.gettempdir()) / "mt5bot-tests-logs"),
 })

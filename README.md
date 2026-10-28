@@ -65,6 +65,9 @@ Activée par `API_ENABLED=true` (avec une `API_KEY` d'au moins 16 caractères), 
 | GET | `/api/account` | Solde, equity, marge, P/L du jour |
 | GET | `/api/positions` | Positions ouvertes (`?bot_only=true` pour celles du bot) |
 | GET | `/api/sentiment` | Actualités, score par article, sentiment global et par symbole |
+| GET | `/api/data-feeds` | Traçabilité : articles (mots-clés, score, symboles), calendrier (statut de blocage), état des sources |
+| GET | `/api/webhooks/events` | 20 derniers webhooks reçus (acceptés et refusés), secrets masqués |
+| POST | `/api/webhooks/{source}` | Réception TradingView… — auth `?token=` ou `passphrase` (`WEBHOOK_SECRET`), **jamais exécuté** |
 | POST | `/api/control/start` | Reprendre le moteur |
 | POST | `/api/control/stop` | Mettre en pause (aucun nouveau trade, positions conservées) |
 | POST | `/api/control/positions/{ticket}/close` | Clôture **réelle** d'une position |

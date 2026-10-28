@@ -50,6 +50,7 @@ PRICE_DECIMALS = 5                   # arrondi d'affichage ; l'ordre est arrondi
 _news_lock = threading.Lock()
 _news_cache: list[NewsArticle] = []
 _news_fetched_at: float | None = None        # time.monotonic() du dernier téléchargement
+_news_fetched_wall: datetime | None = None   # même instant, en heure UTC (affichage)
 
 
 # =============================================================================
@@ -61,7 +62,7 @@ def get_recent_news() -> list[NewsArticle]:
     Actualités récentes, partagées entre symboles et rafraîchies au plus toutes les
     `settings.news.refresh_interval_seconds`. Un échec conserve le cache précédent.
     """
-    global _news_cache, _news_fetched_at
+    global _news_cache, _news_fetched_at, _news_fetched_wall
     with _news_lock:
         now = time.monotonic()
         if _news_fetched_at is not None and now - _news_fetched_at < settings.news.refresh_interval_seconds:
@@ -70,7 +71,13 @@ def get_recent_news() -> list[NewsArticle]:
         if articles:
             _news_cache = articles
         _news_fetched_at = now
+        _news_fetched_wall = datetime.now(timezone.utc)
         return _news_cache
+
+
+def get_news_fetched_at() -> datetime | None:
+    """Heure UTC du dernier téléchargement des flux (None si jamais téléchargés)."""
+    return _news_fetched_wall
 
 
 def _entry_price(symbol: str, action: Action, fallback: float | None) -> float | None:

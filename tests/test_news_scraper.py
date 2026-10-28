@@ -103,3 +103,28 @@ def test_latest_news_dedup_lookback_and_sort(monkeypatch):
     articles = ns.get_latest_news(feeds=["https://feed"], lookback_hours=6)
     assert [a.title for a in articles] == ["B", "A", "D"]
     assert ns.get_latest_news(feeds=[]) == []
+
+
+def test_upcoming_events_window(monkeypatch):
+    events = [_event(-180), _event(-60), _event(30), _event(60 * 30), _event(30, currency="AUD"),
+              _event(30, impact="Low")]
+    monkeypatch.setattr(ns, "_load_calendar", lambda force_refresh=False: events)
+    assert ns.get_upcoming_events(hours_ahead=24, hours_back=2) == [events[1], events[2]]
+    monkeypatch.setattr(ns, "_load_calendar", lambda force_refresh=False: None)
+    assert ns.get_upcoming_events() == []
+
+
+def test_feed_status_is_recorded(monkeypatch):
+    monkeypatch.setattr(ns, "_feed_status", {})
+    monkeypatch.setattr(ns, "_http_get", lambda url: SimpleNamespace(content=RSS))
+    ns._fetch_feed("https://ok.example/rss")
+
+    def boom(url):
+        raise requests.ConnectionError("refusé")
+
+    monkeypatch.setattr(ns, "_http_get", boom)
+    ns._fetch_feed("https://ko.example/rss")
+    statuses = ns.get_feed_statuses(["https://ok.example/rss", "https://ko.example/rss", "https://never.example"])
+    assert statuses["https://ok.example/rss"].ok and statuses["https://ok.example/rss"].article_count == 1
+    assert not statuses["https://ko.example/rss"].ok and "refusé" in statuses["https://ko.example/rss"].error
+    assert statuses["https://never.example"] is None

@@ -1,5 +1,6 @@
 """
-Routes de lecture : statut du bot, compte, positions ouvertes, sentiment des actualités.
+Routes de lecture : statut du bot, compte, positions ouvertes, sentiment des actualités,
+données ingérées (flux RSS, calendrier économique, webhooks).
 
 Les routes sont synchrones (`def`) : FastAPI les exécute dans un pool de threads,
 les appels bloquants à MT5 ou au réseau ne gèlent donc pas le serveur.
@@ -7,24 +8,53 @@ les appels bloquants à MT5 ou au réseau ne gèlent donc pas le serveur.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.dependencies import build_status, get_engine
-from api.schemas import AccountOut, ArticleOut, PositionOut, SentimentOut, StatusOut
+from api.routes.webhooks import ENDPOINT as WEBHOOK_ENDPOINT
+from api.routes.webhooks import webhook_log
+from api.schemas import (
+    AccountOut,
+    ArticleOut,
+    CalendarEventOut,
+    DataFeedsOut,
+    FeedSourceOut,
+    NewsItemOut,
+    PositionOut,
+    SentimentOut,
+    StatusOut,
+)
 from api.security import require_api_key
 from brokers.mt5_client import get_account_info, get_closed_deals, get_open_positions
 from config.settings import settings
 from core.engine import TradingEngine
-from sentiment.news_scraper import NewsArticle
-from sentiment.sentiment_analyzer import analyze_article, analyze_news_items, classify
+from sentiment.news_scraper import (
+    NEWS_BLOCK_MINUTES_AFTER,
+    NEWS_BLOCK_MINUTES_BEFORE,
+    EconomicEvent,
+    NewsArticle,
+    get_calendar_status,
+    get_feed_statuses,
+    get_upcoming_events,
+    symbol_currencies,
+)
+from sentiment.sentiment_analyzer import (
+    analyze_article,
+    analyze_news_items,
+    classify,
+    detect_keywords,
+    relevant_symbols,
+)
 from sentiment.sentiment_analyzer import get_engine as get_sentiment_engine
-from strategies.strategy_manager import get_recent_news
+from strategies.strategy_manager import get_news_fetched_at, get_recent_news
 
 router = APIRouter(prefix="/api", tags=["Monitoring"], dependencies=[Depends(require_api_key)])
 
 POSITION_TYPE_BUY = 0                # valeur de mt5.POSITION_TYPE_BUY
+CALENDAR_HOURS_BACK = 2              # annonces passées conservées dans la timeline
 
 
 @router.get("/status", response_model=StatusOut, summary="Statut du bot")
@@ -117,3 +147,115 @@ def _article_out(article: NewsArticle) -> ArticleOut:
         score=sentiment["score"],
         label=sentiment["label"],
     )
+
+
+# =============================================================================
+#  Données ingérées (Data & Scraper Monitor)
+# =============================================================================
+
+@router.get("/data-feeds", response_model=DataFeedsOut, summary="Données lues par le bot")
+def get_data_feeds(
+    limit: int = Query(100, ge=1, le=300, description="Nombre maximal d'articles"),
+    hours_ahead: int = Query(24, ge=1, le=168, description="Horizon du calendrier économique (heures)"),
+) -> DataFeedsOut:
+    """
+    Traçabilité de tout ce que le bot lit : articles RSS (mots-clés, score, symboles concernés),
+    annonces économiques à fort impact (statut vis-à-vis du blocage des trades) et état de
+    chaque source (dernière et prochaine lecture).
+    """
+    now = datetime.now(timezone.utc)
+    symbols = list(settings.trading.symbols)
+    articles = get_recent_news()
+    fetched_at = get_news_fetched_at()
+    calendar = [_calendar_item(e, now, symbols)
+                for e in get_upcoming_events(hours_ahead=hours_ahead, hours_back=CALENDAR_HOURS_BACK)]
+    return DataFeedsOut(
+        generated_at=now,
+        tracked_symbols=symbols,
+        block_window_minutes=(NEWS_BLOCK_MINUTES_BEFORE, NEWS_BLOCK_MINUTES_AFTER),
+        sources=_sources(fetched_at),
+        news=[_news_item(a, fetched_at, symbols) for a in articles[:limit]],
+        calendar=calendar,
+    )
+
+
+def _news_item(article: NewsArticle, fetched_at: datetime | None, symbols: list[str]) -> NewsItemOut:
+    text = f"{article.title} {article.snippet}"
+    sentiment = analyze_article(article.title, article.snippet)
+    return NewsItemOut(
+        title=article.title,
+        source=article.source,
+        link=article.link,
+        published=article.published,
+        fetched_at=fetched_at,
+        snippet=article.snippet,
+        score=sentiment["score"],
+        label=sentiment["label"],
+        keywords=detect_keywords(text),
+        symbols=relevant_symbols(text, symbols),
+    )
+
+
+def _calendar_item(event: EconomicEvent, now: datetime, symbols: list[str]) -> CalendarEventOut:
+    """Statut identique à la règle du moteur (`is_high_impact_news_imminent`)."""
+    minutes = (event.time - now).total_seconds() / 60
+    if -NEWS_BLOCK_MINUTES_AFTER <= minutes <= NEWS_BLOCK_MINUTES_BEFORE:
+        event_status = "imminent"
+    elif minutes > 0:
+        event_status = "upcoming"
+    else:
+        event_status = "passed"
+    exposed = [s for s in symbols if event.currency in symbol_currencies(s)]
+    return CalendarEventOut(
+        title=event.title,
+        currency=event.currency,
+        time=event.time,
+        impact=event.impact,
+        forecast=event.forecast,
+        previous=event.previous,
+        status=event_status,
+        blocks_trading=event_status == "imminent" and event.impact == "High" and bool(exposed),
+        symbols=exposed,
+    )
+
+
+def _sources(news_fetched_at: datetime | None) -> list[FeedSourceOut]:
+    """État de chaque source : flux RSS configurés, calendrier économique, webhooks entrants."""
+    sources: list[FeedSourceOut] = []
+    next_news = (news_fetched_at + timedelta(seconds=settings.news.refresh_interval_seconds)
+                 if news_fetched_at else None)
+    for url, feed in get_feed_statuses().items():
+        name = urlparse(url).netloc.removeprefix("www.") or url
+        if feed is None:
+            sources.append(FeedSourceOut(name=name, kind="rss", url=url, status="pending", last_fetch=None,
+                                         next_fetch=next_news, items=0, detail="pas encore lu"))
+        else:
+            sources.append(FeedSourceOut(name=name, kind="rss", url=url, status="ok" if feed.ok else "error",
+                                         last_fetch=feed.last_fetch, next_fetch=next_news,
+                                         items=feed.article_count, detail=feed.error))
+
+    calendar = get_calendar_status()
+    last_calendar = calendar["last_fetch"]
+    sources.append(FeedSourceOut(
+        name="Calendrier économique (Forex Factory)",
+        kind="calendar",
+        url=calendar["url"],
+        status="ok" if calendar["available"] else "error",
+        last_fetch=last_calendar,
+        next_fetch=last_calendar + timedelta(seconds=calendar["ttl_seconds"]) if last_calendar else None,
+        items=calendar["event_count"],
+        detail="" if calendar["available"] else "indisponible : nouveaux trades bloqués par précaution",
+    ))
+
+    events = webhook_log.events()
+    sources.append(FeedSourceOut(
+        name="Webhooks entrants",
+        kind="webhook",
+        url=None,
+        status="ok" if settings.api.webhooks_enabled else "disabled",
+        last_fetch=events[0].received_at if events else None,
+        next_fetch=None,
+        items=len(events),
+        detail=WEBHOOK_ENDPOINT if settings.api.webhooks_enabled else "WEBHOOK_SECRET non configuré",
+    ))
+    return sources

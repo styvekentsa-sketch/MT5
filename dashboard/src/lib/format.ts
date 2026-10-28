@@ -57,3 +57,19 @@ export function isSafeUrl(url: string): boolean {
     return false;
   }
 }
+
+/** Heure locale « HH:MM » (ou « HH:MM:SS » avec `seconds`). */
+export function formatClock(iso: string | null, seconds = false): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleTimeString(LOCALE, { hour: "2-digit", minute: "2-digit", ...(seconds ? { second: "2-digit" } : {}) });
+}
+
+/** Date courte locale « 28 oct. » si différente d'aujourd'hui, sinon chaîne vide. */
+export function formatDayIfNotToday(iso: string | null): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime()) || date.toDateString() === new Date().toDateString()) return "";
+  return date.toLocaleDateString(LOCALE, { day: "numeric", month: "short" });
+}

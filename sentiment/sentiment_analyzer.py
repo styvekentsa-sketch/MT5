@@ -30,7 +30,7 @@ import math
 import re
 import threading
 from datetime import datetime, timezone
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, Iterator, Protocol
 
 from config.settings import settings
 from utils.logger import get_logger
@@ -173,6 +173,21 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower().replace("-", " "))
 
 
+def _lexicon_matches(tokens: list[str]) -> Iterator[tuple[int, tuple[str, ...], float]]:
+    """(position, termes, valeur) de chaque entrée du lexique, expression la plus longue d'abord."""
+    i = 0
+    while i < len(tokens):
+        for length in range(min(MAX_PHRASE_LENGTH, len(tokens) - i), 0, -1):
+            key = tuple(tokens[i:i + length])
+            value = LEXICON.get(key)
+            if value is not None:
+                yield i, key, value
+                i += length
+                break
+        else:
+            i += 1
+
+
 class KeywordEngine:
     """Somme des termes du lexique financier, avec gestion simple de la négation."""
 
@@ -181,19 +196,11 @@ class KeywordEngine:
     def score(self, text: str) -> float:
         tokens = _tokenize(text)
         total = 0.0
-        i = 0
-        while i < len(tokens):
-            for length in range(min(MAX_PHRASE_LENGTH, len(tokens) - i), 0, -1):
-                value = LEXICON.get(tuple(tokens[i:i + length]))
-                if value is not None:
-                    window = tokens[max(0, i - NEGATION_WINDOW):i]
-                    if any(t in NEGATIONS or t.endswith("n't") for t in window):
-                        value *= NEGATION_SCALAR
-                    total += value
-                    i += length
-                    break
-            else:
-                i += 1
+        for i, _key, value in _lexicon_matches(tokens):
+            window = tokens[max(0, i - NEGATION_WINDOW):i]
+            if any(t in NEGATIONS or t.endswith("n't") for t in window):
+                value *= NEGATION_SCALAR
+            total += value
         return _normalize(total)
 
 
@@ -349,6 +356,40 @@ def _direction(text: str, base: str | None, quote: str | None) -> float:
     if on_quote and not on_base:
         return -1.0
     return 0.0       # les deux devises citées sans la paire : sens indéterminable
+
+
+def detect_keywords(text: str, limit: int = 8) -> list[str]:
+    """Termes du lexique financier présents dans le texte (expressions incluses), sans doublon."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    found: list[str] = []
+    for _i, key, _value in _lexicon_matches(_tokenize(text)):
+        term = " ".join(key)
+        if term not in found:
+            found.append(term)
+            if len(found) >= limit:
+                break
+    return found
+
+
+def relevant_symbols(text: str, symbols: Iterable[str]) -> dict[str, float]:
+    """
+    Symboles concernés par un texte et sens de l'impact pour chacun :
+    +1 (actif de base), -1 (devise de cotation), PAIR_MENTION_BOOST (paire citée).
+    Les symboles non concernés ou ambigus sont absents du résultat.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return {}
+    lowered = text.lower()
+    result: dict[str, float] = {}
+    for symbol in symbols:
+        base, quote = split_symbol(symbol)
+        if base is None:
+            continue
+        direction = _direction(lowered, base, quote)
+        if direction:
+            result[symbol] = direction
+    return result
 
 
 def _field(item: Any, name: str) -> Any:

@@ -156,14 +156,23 @@ class ApiConfig:
     port: int
     api_key: str = field(repr=False)
     cors_origins: tuple[str, ...]
+    webhook_secret: str = field(default="", repr=False)   # vide = réception de webhooks désactivée
 
     @property
     def is_local_only(self) -> bool:
         return self.host in LOOPBACK_HOSTS
 
+    @property
+    def webhooks_enabled(self) -> bool:
+        return bool(self.webhook_secret)
+
     def validate(self) -> None:
         if not self.enabled:
             return
+        if self.webhook_secret and len(self.webhook_secret) < API_KEY_MIN_LENGTH:
+            raise ConfigError(f"WEBHOOK_SECRET doit faire au moins {API_KEY_MIN_LENGTH} caractères")
+        if self.webhook_secret and self.webhook_secret == self.api_key:
+            raise ConfigError("WEBHOOK_SECRET doit être différent d'API_KEY (il est collé dans TradingView)")
         if len(self.api_key) < API_KEY_MIN_LENGTH:
             raise ConfigError(f"API_ENABLED=true nécessite une API_KEY d'au moins {API_KEY_MIN_LENGTH} caractères")
         if not 1 <= self.port <= 65535:
@@ -271,6 +280,7 @@ def load_settings() -> Settings:
             port=get_int("API_PORT", 8000),
             api_key=get_str("API_KEY"),
             cors_origins=get_list("API_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"),
+            webhook_secret=get_str("WEBHOOK_SECRET"),
         ),
     )
     cfg.validate()

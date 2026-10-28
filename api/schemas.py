@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -125,3 +125,84 @@ class KillSwitchOut(BaseModel):
     failed: int
     engine_paused: bool
     results: list[ClosedPositionOut]
+
+
+# =============================================================================
+#  Données ingérées (Data Feeds)
+# =============================================================================
+
+class FeedSourceOut(BaseModel):
+    name: str
+    kind: Literal["rss", "calendar", "webhook"]
+    url: str | None = Field(description="Adresse lue par le bot (None pour les webhooks entrants)")
+    status: Literal["ok", "error", "pending", "disabled"]
+    last_fetch: datetime | None
+    next_fetch: datetime | None = Field(description="Prochaine lecture prévue (cache côté bot)")
+    items: int
+    detail: str = ""
+
+
+class NewsItemOut(BaseModel):
+    title: str
+    source: str
+    link: str
+    published: datetime | None
+    fetched_at: datetime | None = Field(description="Heure d'extraction par le bot")
+    snippet: str
+    score: float = Field(ge=-1, le=1)
+    label: Literal["bullish", "bearish", "neutral"]
+    keywords: list[str] = Field(description="Termes du lexique financier détectés")
+    symbols: dict[str, float] = Field(
+        description="Symboles suivis concernés et sens de l'impact (+1 base, -1 cotation, 1.5 paire citée)")
+
+
+class CalendarEventOut(BaseModel):
+    title: str
+    currency: str
+    time: datetime
+    impact: str
+    forecast: str
+    previous: str
+    status: Literal["imminent", "upcoming", "passed"] = Field(
+        description="imminent = dans la fenêtre de blocage des nouveaux trades")
+    blocks_trading: bool
+    symbols: list[str] = Field(description="Symboles tradés exposés à cette annonce")
+
+
+class DataFeedsOut(BaseModel):
+    generated_at: datetime
+    tracked_symbols: list[str]
+    block_window_minutes: tuple[int, int] = Field(description="(avant, après) l'annonce")
+    sources: list[FeedSourceOut]
+    news: list[NewsItemOut]
+    calendar: list[CalendarEventOut]
+
+
+# =============================================================================
+#  Webhooks entrants
+# =============================================================================
+
+class WebhookEventOut(BaseModel):
+    id: int
+    received_at: datetime
+    source: str
+    symbol: str | None
+    action: str | None
+    accepted: bool
+    reason: str
+    client: str
+    size_bytes: int
+    payload: Any = Field(description="Corps reçu (JSON ou texte brut), secrets masqués")
+
+
+class WebhookLogOut(BaseModel):
+    enabled: bool = Field(description="False si WEBHOOK_SECRET n'est pas configuré")
+    endpoint: str = Field(description="Chemin de réception, ex : /api/webhooks/{source}")
+    capacity: int
+    events: list[WebhookEventOut]
+
+
+class WebhookAckOut(BaseModel):
+    accepted: bool
+    id: int
+    message: str

@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import control, monitoring
+from api.routes import control, monitoring, webhooks
 from brokers.mt5_client import MT5ConnectionError
 from config.settings import settings
 from core.engine import TradingEngine
@@ -39,6 +39,7 @@ SHUTDOWN_TIMEOUT_SECONDS = 5
 OPENAPI_TAGS = [
     {"name": "Monitoring", "description": "Lecture de l'état du bot, du compte, des positions et du sentiment."},
     {"name": "Contrôle", "description": "Actions sur le bot : pause, reprise, kill-switch, mode PAPER/LIVE."},
+    {"name": "Webhooks", "description": "Signaux entrants (TradingView...) : journalisés, jamais exécutés."},
     {"name": "Santé", "description": "Vérification de disponibilité, sans authentification."},
 ]
 
@@ -65,6 +66,8 @@ def create_app(engine: TradingEngine | None = None) -> FastAPI:
     )
     app.include_router(monitoring.router)
     app.include_router(control.router)
+    app.include_router(webhooks.journal)
+    app.include_router(webhooks.receiver)
 
     @app.exception_handler(MT5ConnectionError)
     async def mt5_unavailable(_request: Request, exc: MT5ConnectionError) -> JSONResponse:

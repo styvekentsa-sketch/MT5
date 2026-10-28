@@ -90,3 +90,19 @@ def test_garbage_items_never_raise():
     assert analyze_news_items([None, 123, {}, "", object()], symbol="EURUSD") == 0.0
     assert analyze_news_items(None) == 0.0
     assert analyze_news_items([{"title": "Euro surges"}], symbol="UNKNOWN") == 0.0
+
+
+def test_detect_keywords():
+    assert sa.detect_keywords("Payrolls better than expected, dollar surges") == ["better than expected", "surges"]
+    assert sa.detect_keywords("rally rally rally", limit=8) == ["rally"]
+    assert sa.detect_keywords("") == [] and sa.detect_keywords(None) == []
+
+
+def test_relevant_symbols_with_direction():
+    symbols = ["EURUSD", "USDJPY", "XAUUSD", "GER40"]
+    assert sa.relevant_symbols("Dollar surges after payrolls", symbols) == {"EURUSD": -1.0, "USDJPY": 1.0, "XAUUSD": -1.0}
+    assert sa.relevant_symbols("Gold hits record", symbols) == {"XAUUSD": 1.0}
+    # La paire citée explicitement prime ; « usd » y concerne aussi les autres paires en USD
+    assert sa.relevant_symbols("EUR/USD breaks out", symbols) == {
+        "EURUSD": sa.PAIR_MENTION_BOOST, "USDJPY": 1.0, "XAUUSD": -1.0}
+    assert sa.relevant_symbols("", symbols) == {}

@@ -2,11 +2,13 @@ import type {
   Account,
   ClosedPosition,
   ControlResult,
+  DataFeeds,
   KillSwitchResult,
   ModeResult,
   Position,
   Sentiment,
   Status,
+  WebhookLog,
 } from "./types";
 
 /** Paramètres de connexion à l'API du bot (modifiables dans l'application). */
@@ -20,6 +22,7 @@ const DEFAULT_TIMEOUT_MS = 8_000;
 // Le premier appel peut télécharger tous les flux RSS côté serveur
 const SENTIMENT_TIMEOUT_MS = 60_000;
 const SENTIMENT_ARTICLE_LIMIT = 30;
+const DATA_FEED_ARTICLE_LIMIT = 100;
 
 /** Supprime les « / » finaux ; retourne "" si l'URL n'est pas en http(s). */
 export function normalizeBaseUrl(url: string): string {
@@ -140,6 +143,12 @@ export const api = {
       signal,
       timeoutMs: SENTIMENT_TIMEOUT_MS,
     }),
+  dataFeeds: (c: Connection, signal?: AbortSignal) =>
+    request<DataFeeds>(c, `/api/data-feeds?limit=${DATA_FEED_ARTICLE_LIMIT}`, {
+      signal,
+      timeoutMs: SENTIMENT_TIMEOUT_MS,
+    }),
+  webhookEvents: (c: Connection, signal?: AbortSignal) => request<WebhookLog>(c, "/api/webhooks/events", { signal }),
 
   start: (c: Connection) => request<ControlResult>(c, "/api/control/start", { method: "POST" }),
   stop: (c: Connection) => request<ControlResult>(c, "/api/control/stop", { method: "POST" }),

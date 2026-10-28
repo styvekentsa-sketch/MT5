@@ -99,3 +99,77 @@ export interface KillSwitchResult {
   engine_paused: boolean;
   results: ClosedPosition[];
 }
+
+// --- Données ingérées (GET /api/data-feeds) ---
+
+export type FeedKind = "rss" | "calendar" | "webhook";
+export type FeedStatus = "ok" | "error" | "pending" | "disabled";
+export type CalendarStatus = "imminent" | "upcoming" | "passed";
+
+export interface FeedSource {
+  name: string;
+  kind: FeedKind;
+  url: string | null;
+  status: FeedStatus;
+  last_fetch: string | null;
+  next_fetch: string | null;
+  items: number;
+  detail: string;
+}
+
+export interface NewsItem {
+  title: string;
+  source: string;
+  link: string;
+  published: string | null;
+  fetched_at: string | null;
+  snippet: string;
+  score: number;
+  label: SentimentLabel;
+  keywords: string[];
+  /** Symbole -> sens de l'impact (+1 base, -1 cotation, 1.5 paire citée) */
+  symbols: Record<string, number>;
+}
+
+export interface CalendarEvent {
+  title: string;
+  currency: string;
+  time: string;
+  impact: string;
+  forecast: string;
+  previous: string;
+  status: CalendarStatus;
+  blocks_trading: boolean;
+  symbols: string[];
+}
+
+export interface DataFeeds {
+  generated_at: string;
+  tracked_symbols: string[];
+  block_window_minutes: [number, number];
+  sources: FeedSource[];
+  news: NewsItem[];
+  calendar: CalendarEvent[];
+}
+
+// --- Webhooks entrants (GET /api/webhooks/events) ---
+
+export interface WebhookEvent {
+  id: number;
+  received_at: string;
+  source: string;
+  symbol: string | null;
+  action: string | null;
+  accepted: boolean;
+  reason: string;
+  client: string;
+  size_bytes: number;
+  payload: unknown;
+}
+
+export interface WebhookLog {
+  enabled: boolean;
+  endpoint: string;
+  capacity: number;
+  events: WebhookEvent[];
+}
