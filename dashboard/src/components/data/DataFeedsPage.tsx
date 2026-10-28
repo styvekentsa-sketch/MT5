@@ -42,14 +42,15 @@ export function DataFeedsPage({ feeds, webhooks, baseUrl, lastUpdated, onRefresh
 
       <SourcesStrip sources={feeds?.sources ?? null} />
 
-      <div className="grid grid-cols-1 items-start gap-4 lg:gap-6 xl:grid-cols-5">
-        <div className="order-2 xl:order-none xl:col-span-3 xl:row-span-2">
+      {/* Mobile : calendrier, flux, webhooks. Tablette : calendrier | webhooks, flux dessous. Bureau : flux à gauche. */}
+      <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5">
+        <div className="order-2 md:order-none md:col-span-2 md:row-start-2 xl:col-span-3 xl:col-start-1 xl:row-span-2 xl:row-start-1">
           <FeedLog news={feeds?.news ?? null} calendar={feeds?.calendar ?? null} symbols={feeds?.tracked_symbols ?? []} />
         </div>
-        <div className="order-1 xl:order-none xl:col-span-2">
+        <div className="order-1 md:order-none md:col-start-1 md:row-start-1 xl:col-span-2 xl:col-start-4">
           <CalendarTimeline events={feeds?.calendar ?? null} blockWindow={feeds?.block_window_minutes ?? null} />
         </div>
-        <div className="order-3 xl:order-none xl:col-span-2">
+        <div className="order-3 md:order-none md:col-start-2 md:row-start-1 xl:col-span-2 xl:col-start-4 xl:row-start-2">
           <WebhookConsole log={webhooks} baseUrl={baseUrl} />
         </div>
       </div>

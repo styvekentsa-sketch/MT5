@@ -6,12 +6,13 @@ import { ControlPanel } from "./components/ControlPanel";
 import { CycleOutcomes } from "./components/CycleOutcomes";
 import { DataFeedsPage } from "./components/data/DataFeedsPage";
 import { MobileNav, type Tab } from "./components/MobileNav";
+import { PriceChart } from "./components/Chart";
 import { PositionsTable } from "./components/PositionsTable";
 import { SentimentMonitor } from "./components/SentimentMonitor";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Toasts } from "./components/ui/Toasts";
 import { useConnection } from "./hooks/useConnection";
-import { useInstallPrompt, useOnlineStatus } from "./hooks/useDevice";
+import { useInstallPrompt, useMediaQuery, useOnlineStatus } from "./hooks/useDevice";
 import { usePolling } from "./hooks/usePolling";
 import { useToasts } from "./hooks/useToasts";
 
@@ -57,6 +58,8 @@ export default function App() {
     enabled,
   );
   const onDataView = tab === "data";
+  // À partir de la tablette (md), tous les panneaux de la vue sont affichés ensemble
+  const isWide = useMediaQuery("(min-width: 768px)");
   const dataFeeds = usePolling(
     useCallback((s: AbortSignal) => api.dataFeeds(connection, s), [connection]),
     DATA_FEEDS_POLL_MS,
@@ -114,9 +117,9 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  // Mobile : un panneau à la fois (barre de navigation). À partir de `lg` : vue « Trading »
+  // Mobile (< md) : un panneau à la fois (barre de navigation). À partir de `md` : vue « Trading »
   // (tous les panneaux) ou vue « Données », selon les onglets du haut.
-  const panel = (id: Tab) => (tab === id ? "" : onDataView ? "hidden" : "hidden lg:block");
+  const panel = (id: Tab) => (tab === id ? "" : onDataView ? "hidden" : "hidden md:block");
   const { refresh: refreshDataFeeds } = dataFeeds;
   const { refresh: refreshWebhooks } = webhookLog;
 
@@ -157,10 +160,10 @@ export default function App() {
         }
       />
 
-      <main className="px-safe pb-mobile-nav mx-auto flex max-w-7xl flex-col gap-4 pt-4 lg:gap-6 lg:pt-6 lg:pb-8">
+      <main className="px-safe pb-mobile-nav mx-auto flex max-w-7xl flex-col gap-4 pt-4 md:pb-8 lg:gap-6 lg:pt-6 2xl:max-w-[100rem]">
         <ConnectionBanner online={online} baseUrl={connection.baseUrl} error={bannerError} status={status.data} />
 
-        <nav className="hidden gap-1 self-start rounded-md border border-line bg-surface-2 p-1 lg:flex" aria-label="Vues">
+        <nav className="hidden gap-1 self-start rounded-md border border-line bg-surface-2 p-1 md:flex" aria-label="Vues">
           {VIEW_TABS.map(({ label, tab: target }) => {
             const active = (target === "data") === onDataView;
             return (
@@ -196,9 +199,20 @@ export default function App() {
           <AccountOverview account={account.data} />
         </div>
 
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
-          <div className="flex flex-col gap-6 xl:col-span-3">
-            <div className={panel("positions")}>
+        {/*
+          Mobile : une colonne. Tablette (md) : graphique pleine largeur, puis positions + moteur
+          à gauche et actualités à droite. Bureau (xl) : graphique, positions et moteur sur 3/5,
+          actualités sur 2/5 de toute la hauteur (disposition station de trading).
+        */}
+        <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5">
+            <div className={`md:col-span-2 xl:col-span-3 xl:col-start-1 xl:row-start-1 ${panel("positions")}`}>
+              <PriceChart
+                connection={connection}
+                symbols={status.data?.symbols ?? []}
+                active={enabled && !onDataView && (isWide || tab === "positions")}
+              />
+            </div>
+            <div className={`md:col-start-1 md:row-start-2 xl:col-span-3 ${panel("positions")}`}>
               <PositionsTable
                 positions={positions.data}
                 currency={account.data?.currency ?? "USD"}
@@ -212,16 +226,17 @@ export default function App() {
                 }
               />
             </div>
-            <div className={panel("engine")}>
+            <div className={`md:col-start-1 md:row-start-3 xl:col-span-3 ${panel("engine")}`}>
               <CycleOutcomes status={status.data} />
             </div>
-          </div>
-          <div className={`xl:col-span-2 ${panel("news")}`}>
+          <div
+            className={`md:col-start-2 md:row-span-2 md:row-start-2 xl:col-span-2 xl:col-start-4 xl:row-span-3 xl:row-start-1 ${panel("news")}`}
+          >
             <SentimentMonitor sentiment={sentiment.data} lastUpdated={sentiment.lastUpdated} onRefresh={refreshSentiment} />
           </div>
         </div>
 
-        <footer className="hidden text-xs text-slate-600 lg:block">
+        <footer className="hidden text-xs text-slate-600 md:block">
           API : <span className="font-mono">{connection.baseUrl}</span> · rafraîchissement {LIVE_POLL_MS / 1000} s
         </footer>
       </main>

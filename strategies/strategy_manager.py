@@ -24,14 +24,16 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from brokers.mt5_client import get_current_tick, get_historical_data
 from config.settings import settings
 from sentiment.news_scraper import NewsArticle, get_latest_news, is_high_impact_news_imminent
-from sentiment.sentiment_analyzer import analyze_news_items, classify
+from sentiment.sentiment_analyzer import analyze_news_items, article_insights, classify
 from strategies.technical_analysis import TechnicalSignal, technical_signal
+from utils.database import get_database
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -70,9 +72,23 @@ def get_recent_news() -> list[NewsArticle]:
         articles = get_latest_news()
         if articles:
             _news_cache = articles
+            _persist_articles(articles)
         _news_fetched_at = now
         _news_fetched_wall = datetime.now(timezone.utc)
         return _news_cache
+
+
+def _persist_articles(articles: list[NewsArticle]) -> None:
+    """Historise les articles téléchargés avec leur analyse (table market_sentiment)."""
+    try:
+        symbols = settings.trading.symbols
+        get_database().upsert_articles(
+            {"link": a.link, "title": a.title, "source": a.source, "published_at": a.published,
+             "snippet": a.snippet, **article_insights(a.title, a.snippet, symbols)}
+            for a in articles
+        )
+    except Exception:  # noqa: BLE001 - l'historique ne doit jamais bloquer la stratégie
+        log.exception("Historisation des articles impossible")
 
 
 def get_news_fetched_at() -> datetime | None:
@@ -160,6 +176,46 @@ def _decision(
 #  Évaluation du marché
 # =============================================================================
 
+@dataclass(frozen=True)
+class HybridDecision:
+    action: Action                   # BUY / SELL si toutes les conditions sont réunies, sinon HOLD
+    hybrid: float                    # score combiné dans [-1, 1]
+    confidence: int                  # |hybrid| x 100
+    reasons: tuple[str, ...]
+
+
+def decide(tech: TechnicalSignal, sentiment: float, news_blocked: bool, has_news: bool = True) -> HybridDecision:
+    """
+    Cœur pur de la décision (sans accès au marché), partagé par le moteur et le backtest :
+    score hybride = poids technique x technique + poids news x sentiment, puis filtres
+    (annonce imminente, seuil, confirmation obligatoire par le signal technique).
+    """
+    tech_weight = settings.strategy.technical_weight
+    news_weight = settings.strategy.sentiment_weight
+    threshold = settings.strategy.signal_threshold
+    hybrid = round(max(-1.0, min(1.0, tech_weight * tech.score + news_weight * sentiment)), 4)
+    confidence = int(round(abs(hybrid) * 100))
+    direction: Action = "BUY" if hybrid > 0 else "SELL" if hybrid < 0 else "HOLD"
+
+    reasons = [
+        f"Technique {tech.signal} ({tech.score:+.2f}) : {'; '.join(tech.reasons)}",
+        f"Sentiment {classify(sentiment)} ({sentiment:+.2f}"
+        f"{', aucune actualité disponible' if not has_news else ''})",
+        f"Score hybride {hybrid:+.2f} ({tech_weight:.0%} technique / {news_weight:.0%} news, seuil {threshold:.2f})",
+    ]
+
+    action: Action = "HOLD"
+    if news_blocked:
+        reasons.append("Annonce à fort impact imminente : trade bloqué")
+    elif abs(hybrid) < threshold:
+        reasons.append("Score insuffisant : pas de trade")
+    elif tech.signal != direction:
+        reasons.append("Signal technique non confirmé : pas de trade sur le seul sentiment")
+    else:
+        action = direction
+    return HybridDecision(action, hybrid, confidence, tuple(reasons))
+
+
 def _evaluate(symbol: str) -> dict[str, Any]:
     # 1. Analyse technique
     try:
@@ -177,31 +233,10 @@ def _evaluate(symbol: str) -> dict[str, Any]:
     articles = get_recent_news()
     sentiment = analyze_news_items(articles, symbol=symbol) if articles else 0.0
 
-    # 3. Score hybride
-    tech_weight = settings.strategy.technical_weight
-    news_weight = settings.strategy.sentiment_weight
-    threshold = settings.strategy.signal_threshold
-    hybrid = round(max(-1.0, min(1.0, tech_weight * tech.score + news_weight * sentiment)), 4)
-    confidence = int(round(abs(hybrid) * 100))
-    direction: Action = "BUY" if hybrid > 0 else "SELL" if hybrid < 0 else "HOLD"
-
-    reasons = [
-        f"Technique {tech.signal} ({tech.score:+.2f}) : {'; '.join(tech.reasons)}",
-        f"Sentiment {classify(sentiment)} ({sentiment:+.2f}"
-        f"{', aucune actualité disponible' if not articles else ''})",
-        f"Score hybride {hybrid:+.2f} ({tech_weight:.0%} technique / {news_weight:.0%} news, seuil {threshold:.2f})",
-    ]
-
-    # 4. Filtres
-    action: Action = "HOLD"
-    if news_blocked:
-        reasons.append("Annonce à fort impact imminente : trade bloqué")
-    elif abs(hybrid) < threshold:
-        reasons.append("Score insuffisant : pas de trade")
-    elif tech.signal != direction:
-        reasons.append("Signal technique non confirmé : pas de trade sur le seul sentiment")
-    else:
-        action = direction
+    # 3-4. Score hybride et filtres (logique partagée avec le backtest)
+    hybrid_decision = decide(tech, sentiment, news_blocked, has_news=bool(articles))
+    action, hybrid, confidence = hybrid_decision.action, hybrid_decision.hybrid, hybrid_decision.confidence
+    reasons = list(hybrid_decision.reasons)
 
     # 5. Niveaux de sortie
     sl = tp = entry = None

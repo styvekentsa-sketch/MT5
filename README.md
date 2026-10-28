@@ -115,3 +115,31 @@ python -m pytest
 ```
 
 Couverture : configuration, calendrier économique et flux RSS, sentiment (orientation par paire, robustesse), indicateurs techniques, décision hybride et SL/TP, taille de position et règles de risque, moteur (séquence, cooldown, isolation des erreurs, arrêt), API (authentification, CORS, monitoring, contrôle).
+
+## Notifications (Telegram / Discord)
+
+Renseigner dans `.env` `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` et/ou `DISCORD_WEBHOOK_URL` (voir `.env.example`), puis redémarrer le bot. Alertes envoyées : démarrage et arrêt du bot, webhook reçu ou rejeté, trade bloqué par le calendrier économique ou par une règle de risque. L'envoi est non bloquant (file + thread dédié) : une panne réseau ne ralentit ni n'interrompt jamais le moteur. Une même alerte répétée n'est pas renvoyée avant `NOTIFY_COOLDOWN_SECONDS` (15 min par défaut).
+
+## Historique (SQLite)
+
+Base locale `data/trading_bot.db` (créée automatiquement, exclue de git) : webhooks reçus (`webhooks_log`), articles analysés (`market_sentiment`), décision du moteur pour chaque symbole à chaque tour (`trade_decisions`). L'historique plus ancien que `DB_RETENTION_DAYS` (90 jours) est purgé au démarrage. Consultation via l'API, paginée et filtrable :
+
+| Route | Filtres |
+|---|---|
+| `GET /api/history/webhooks` | `source`, `accepted`, `limit`, `offset` |
+| `GET /api/history/trades` | `symbol`, `status` (répétable), `trades_only`, `since`, `limit`, `offset` |
+| `GET /api/history/sentiment` | `symbol`, `label`, `limit`, `offset` |
+
+## Backtest
+
+Rejoue la stratégie bougie par bougie avec le **même code** que le bot : signal technique, `decide()` (poids, seuil, confirmation technique), SL/TP, puis `calculate_position_size` et `validate_trade_risk` exécutés contre un broker simulé (pertes journalières et consécutives comprises). Décision à la clôture d'une bougie, entrée à l'ouverture de la suivante (aucune donnée future).
+
+```powershell
+python -m backtesting.runner --symbol EURUSD --mt5 --bars 5000                 # historique du terminal MT5
+python -m backtesting.runner --symbol EURUSD --csv data\EURUSD_M15.csv         # CSV standard ou export MT5
+python -m backtesting.runner --symbol XAUUSD --mt5 --calendar annonces.csv --out reports\xau
+```
+
+Métriques : rendement total, drawdown maximal, taux de réussite, profit factor, gain/perte moyens, espérance par trade, et motifs de refus du risque. `--out` écrit `trades.csv`, `equity.csv` et `report.json`.
+
+Limites : un symbole par backtest ; sentiment neutre par défaut (`--sentiment database` rejoue les articles historisés) ; calendrier uniquement via `--calendar` ; profits calculés dans la devise de cotation (exact pour les paires en USD sur un compte USD) ; swaps et glissement hors gaps non simulés.

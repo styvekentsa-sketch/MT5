@@ -206,3 +206,95 @@ class WebhookAckOut(BaseModel):
     accepted: bool
     id: int
     message: str
+
+
+# =============================================================================
+#  Historique (SQLite)
+# =============================================================================
+
+class WebhookHistoryItem(BaseModel):
+    id: int
+    received_at: datetime
+    source: str
+    symbol: str | None
+    action: str | None
+    accepted: bool
+    reason: str
+    client: str
+    size_bytes: int
+    payload: Any
+
+
+class DecisionHistoryItem(BaseModel):
+    id: int
+    decided_at: datetime
+    cycle: int | None
+    symbol: str
+    status: str = Field(description="traded, hold, news_blocked, cooldown, rejected, failed ou error")
+    action: str | None
+    confidence: int | None
+    technical_score: float | None
+    sentiment_score: float | None
+    hybrid_score: float | None
+    entry_price: float | None
+    sl: float | None
+    tp: float | None
+    volume: float | None
+    ticket: int | None
+    dry_run: bool | None
+    detail: str
+
+
+class ArticleHistoryItem(BaseModel):
+    id: int
+    link: str
+    title: str
+    source: str
+    published_at: datetime | None
+    first_seen_at: datetime
+    last_seen_at: datetime
+    snippet: str
+    score: float
+    label: str
+    keywords: list[str]
+    symbols: dict[str, float]
+
+
+class HistoryPage(BaseModel):
+    total: int = Field(description="Nombre total d'éléments correspondant aux filtres")
+    limit: int
+    offset: int
+
+
+class WebhookHistoryOut(HistoryPage):
+    items: list[WebhookHistoryItem]
+
+
+class DecisionHistoryOut(HistoryPage):
+    items: list[DecisionHistoryItem]
+
+
+class ArticleHistoryOut(HistoryPage):
+    items: list[ArticleHistoryItem]
+
+
+# =============================================================================
+#  Marché (graphique)
+# =============================================================================
+
+class CandleOut(BaseModel):
+    time: int = Field(description="Ouverture de la bougie, secondes Unix (heure serveur du broker)")
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class CandlesOut(BaseModel):
+    symbol: str
+    timeframe: str
+    digits: int = Field(description="Nombre de décimales du prix")
+    bid: float | None
+    ask: float | None
+    candles: list[CandleOut] = Field(description="Ordre chronologique ; la dernière bougie est en cours")

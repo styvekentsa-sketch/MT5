@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.dependencies import build_status, get_engine
 from api.routes.webhooks import ENDPOINT as WEBHOOK_ENDPOINT
-from api.routes.webhooks import webhook_log
+from api.routes.webhooks import webhook_stats
 from api.schemas import (
     AccountOut,
     ArticleOut,
@@ -44,9 +44,8 @@ from sentiment.news_scraper import (
 from sentiment.sentiment_analyzer import (
     analyze_article,
     analyze_news_items,
+    article_insights,
     classify,
-    detect_keywords,
-    relevant_symbols,
 )
 from sentiment.sentiment_analyzer import get_engine as get_sentiment_engine
 from strategies.strategy_manager import get_news_fetched_at, get_recent_news
@@ -180,8 +179,6 @@ def get_data_feeds(
 
 
 def _news_item(article: NewsArticle, fetched_at: datetime | None, symbols: list[str]) -> NewsItemOut:
-    text = f"{article.title} {article.snippet}"
-    sentiment = analyze_article(article.title, article.snippet)
     return NewsItemOut(
         title=article.title,
         source=article.source,
@@ -189,10 +186,7 @@ def _news_item(article: NewsArticle, fetched_at: datetime | None, symbols: list[
         published=article.published,
         fetched_at=fetched_at,
         snippet=article.snippet,
-        score=sentiment["score"],
-        label=sentiment["label"],
-        keywords=detect_keywords(text),
-        symbols=relevant_symbols(text, symbols),
+        **article_insights(article.title, article.snippet, symbols),
     )
 
 
@@ -247,15 +241,15 @@ def _sources(news_fetched_at: datetime | None) -> list[FeedSourceOut]:
         detail="" if calendar["available"] else "indisponible : nouveaux trades bloqués par précaution",
     ))
 
-    events = webhook_log.events()
+    last_received, total_webhooks = webhook_stats()
     sources.append(FeedSourceOut(
         name="Webhooks entrants",
         kind="webhook",
         url=None,
         status="ok" if settings.api.webhooks_enabled else "disabled",
-        last_fetch=events[0].received_at if events else None,
+        last_fetch=last_received,
         next_fetch=None,
-        items=len(events),
+        items=total_webhooks,
         detail=WEBHOOK_ENDPOINT if settings.api.webhooks_enabled else "WEBHOOK_SECRET non configuré",
     ))
     return sources

@@ -9,6 +9,9 @@ dédié (`WEBHOOK_SECRET`, distinct de l'API_KEY) transmis soit dans l'URL
 (`?token=...`), soit dans le JSON (`"passphrase"`, `"secret"` ou `"token"`).
 Les champs secrets sont masqués avant stockage ; les tentatives refusées sont aussi
 journalisées (utile pour diagnostiquer une alerte mal configurée).
+
+Stockage : table SQLite `webhooks_log` (persistante). Le journal en mémoire ne sert
+que de secours si la base est indisponible.
 """
 
 from __future__ import annotations
@@ -27,7 +30,9 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from api.schemas import WebhookAckOut, WebhookEventOut, WebhookLogOut
 from api.security import require_api_key
 from config.settings import settings
+from utils.database import get_database
 from utils.logger import get_logger
+from utils.notifier import Level, notify
 
 log = get_logger(__name__)
 
@@ -86,7 +91,35 @@ class WebhookLog:
             self._events.clear()
 
 
-webhook_log = WebhookLog()
+webhook_log = WebhookLog()     # secours si la base SQLite est indisponible
+
+
+def _record(**fields: Any) -> WebhookEvent:
+    """Enregistre le webhook en base ; en cas d'échec, dans le journal en mémoire."""
+    received_at = datetime.now(timezone.utc)
+    webhook_id = get_database().insert_webhook(received_at=received_at, **fields)
+    if webhook_id is None:
+        return webhook_log.add(**fields)
+    return WebhookEvent(id=webhook_id, received_at=received_at, **fields)
+
+
+def recent_events(limit: int = LOG_CAPACITY) -> list[WebhookEvent]:
+    """Derniers webhooks, du plus récent au plus ancien (base, sinon mémoire)."""
+    db = get_database()
+    if not db.available:
+        return webhook_log.events()[:limit]
+    items, _ = db.list_webhooks(limit=limit)
+    return [WebhookEvent(**{**item, "received_at": datetime.fromisoformat(item["received_at"])}) for item in items]
+
+
+def webhook_stats() -> tuple[datetime | None, int]:
+    """(date du dernier webhook reçu, nombre total en historique)."""
+    db = get_database()
+    if not db.available:
+        events = webhook_log.events()
+        return (events[0].received_at if events else None), len(events)
+    items, total = db.list_webhooks(limit=1)
+    return (datetime.fromisoformat(items[0]["received_at"]) if items else None), total
 
 
 # =============================================================================
@@ -183,17 +216,21 @@ async def receive_webhook(
 
     expected = settings.api.webhook_secret
     if not expected:
-        webhook_log.add(accepted=False, reason="réception désactivée (WEBHOOK_SECRET vide)", **fields)
+        _record(accepted=False, reason="réception désactivée (WEBHOOK_SECRET vide)", **fields)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Réception de webhooks désactivée")
 
     provided = _provided_secret(request, payload)
     if not provided or not secrets.compare_digest(provided.encode(), expected.encode()):
-        webhook_log.add(accepted=False, reason="secret absent ou invalide", **fields)
+        _record(accepted=False, reason="secret absent ou invalide", **fields)
         log.warning("Webhook %s refusé depuis %s : secret absent ou invalide", source, fields["client"])
+        notify(f"Webhook {source} rejeté", f"Secret absent ou invalide · origine {fields['client']}",
+               Level.WARNING, dedup_key=f"webhook-rejected:{source}:{fields['client']}")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Secret de webhook absent ou invalide")
 
-    event = webhook_log.add(accepted=True, reason="journalisé (non exécuté)", **fields)
+    event = _record(accepted=True, reason="journalisé (non exécuté)", **fields)
     log.info("Webhook %s #%d reçu : %s %s", source, event.id, event.action or "?", event.symbol or "?")
+    notify(f"Webhook {source} reçu", f"Signal #{event.id} : {event.action or '?'} {event.symbol or '?'} "
+                                     "(journalisé, non exécuté)")
     return WebhookAckOut(accepted=True, id=event.id,
                          message="Signal journalisé : aucun ordre n'est passé automatiquement")
 
@@ -205,5 +242,5 @@ def list_webhook_events() -> WebhookLogOut:
         enabled=settings.api.webhooks_enabled,
         endpoint=ENDPOINT,
         capacity=webhook_log.capacity,
-        events=[WebhookEventOut(**e.__dict__) for e in webhook_log.events()],
+        events=[WebhookEventOut(**e.__dict__) for e in recent_events(webhook_log.capacity)],
     )

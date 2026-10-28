@@ -181,6 +181,47 @@ class ApiConfig:
             raise ConfigError("API_CORS_ORIGINS ne doit pas contenir '*' : listez les origines du dashboard")
 
 
+DISCORD_WEBHOOK_PREFIXES = ("https://discord.com/api/webhooks/", "https://discordapp.com/api/webhooks/")
+
+
+@dataclass(frozen=True)
+class NotifierConfig:
+    telegram_bot_token: str = field(repr=False)
+    telegram_chat_id: str
+    discord_webhook_url: str = field(repr=False)
+    cooldown_seconds: int
+    timeout_seconds: int
+
+    @property
+    def channels(self) -> list[str]:
+        names = []
+        if self.telegram_bot_token and self.telegram_chat_id:
+            names.append("Telegram")
+        if self.discord_webhook_url:
+            names.append("Discord")
+        return names
+
+    def validate(self) -> None:
+        if bool(self.telegram_bot_token) != bool(self.telegram_chat_id):
+            raise ConfigError("TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID doivent être renseignés ensemble")
+        if self.discord_webhook_url and not self.discord_webhook_url.startswith(DISCORD_WEBHOOK_PREFIXES):
+            raise ConfigError("DISCORD_WEBHOOK_URL doit commencer par https://discord.com/api/webhooks/")
+        if self.cooldown_seconds < 0:
+            raise ConfigError("NOTIFY_COOLDOWN_SECONDS doit être >= 0")
+        if not 1 <= self.timeout_seconds <= 60:
+            raise ConfigError("NOTIFY_TIMEOUT_SECONDS doit être compris entre 1 et 60")
+
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    path: Path
+    retention_days: int
+
+    def validate(self) -> None:
+        if self.retention_days < 1:
+            raise ConfigError("DB_RETENTION_DAYS doit être >= 1")
+
+
 @dataclass(frozen=True)
 class Settings:
     dry_run: bool                    # mode au démarrage : True = Paper, False = Live (modifiable via l'API)
@@ -193,6 +234,8 @@ class Settings:
     strategy: StrategyConfig
     log: LogConfig
     api: ApiConfig
+    notifier: NotifierConfig
+    database: DatabaseConfig
 
     @property
     def mode(self) -> str:
@@ -202,7 +245,8 @@ class Settings:
         if self.loop_interval_seconds < 1:
             raise ConfigError("BOT_LOOP_INTERVAL_SECONDS doit être >= 1")
         for section in (self.mt5, self.trading, self.risk, self.news,
-                        self.sentiment, self.strategy, self.log, self.api):
+                        self.sentiment, self.strategy, self.log, self.api, self.notifier,
+                        self.database):
             section.validate()
 
     def summary(self) -> str:
@@ -217,6 +261,8 @@ class Settings:
             f"  Pondération     : technique {self.strategy.technical_weight} / sentiment {self.strategy.sentiment_weight}",
             f"  Sources news    : {len(self.news.rss_feeds)} RSS | NewsAPI {mask(self.news.newsapi_key)}"
             f" | Finnhub {mask(self.news.finnhub_api_key)} | AlphaVantage {mask(self.news.alphavantage_api_key)}",
+            f"  Notifications   : {', '.join(self.notifier.channels) or 'désactivées'}",
+            f"  Historique      : {self.database.path} (conservé {self.database.retention_days} jours)",
         ])
 
 
@@ -225,6 +271,9 @@ def load_settings() -> Settings:
     log_dir = Path(get_str("LOG_DIR", "logs"))
     if not log_dir.is_absolute():
         log_dir = BASE_DIR / log_dir
+    db_path = Path(get_str("DB_PATH", "data/trading_bot.db"))
+    if not db_path.is_absolute():
+        db_path = BASE_DIR / db_path
 
     cfg = Settings(
         dry_run=get_bool("DRY_RUN", True),
@@ -281,6 +330,17 @@ def load_settings() -> Settings:
             api_key=get_str("API_KEY"),
             cors_origins=get_list("API_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"),
             webhook_secret=get_str("WEBHOOK_SECRET"),
+        ),
+        notifier=NotifierConfig(
+            telegram_bot_token=get_str("TELEGRAM_BOT_TOKEN"),
+            telegram_chat_id=get_str("TELEGRAM_CHAT_ID"),
+            discord_webhook_url=get_str("DISCORD_WEBHOOK_URL"),
+            cooldown_seconds=get_int("NOTIFY_COOLDOWN_SECONDS", 900),
+            timeout_seconds=get_int("NOTIFY_TIMEOUT_SECONDS", 10),
+        ),
+        database=DatabaseConfig(
+            path=db_path,
+            retention_days=get_int("DB_RETENTION_DAYS", 90),
         ),
     )
     cfg.validate()

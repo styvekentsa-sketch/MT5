@@ -77,7 +77,7 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
       ) : (
         <>
           {/* Grand écran : tableau */}
-          <div className="hidden overflow-x-auto md:block">
+          <div className="hidden overflow-x-auto xl:block">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-xs tracking-wide text-slate-400 uppercase">
@@ -122,7 +122,7 @@ export function PositionsTable({ positions, currency, disabled, onClose }: Posit
           </div>
 
           {/* Mobile : cartes */}
-          <ul className="divide-y divide-line md:hidden">
+          <ul className="divide-y divide-line xl:hidden">
             {positions.map((p) => (
               <li key={p.ticket} className="space-y-2 px-4 py-3">
                 <div className="flex items-center justify-between gap-2">

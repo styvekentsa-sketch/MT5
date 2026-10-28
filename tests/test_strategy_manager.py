@@ -118,3 +118,19 @@ def test_unexpected_error_holds(market, monkeypatch):
 def test_invalid_technical_data_holds(market):
     market["tech"] = TechnicalSignal(signal="NEUTRAL", score=0.0, reasons=("historique insuffisant",))
     assert sm.evaluate_market("EURUSD")["action"] == "HOLD"
+
+
+def test_fresh_articles_are_persisted(monkeypatch, isolated_database):
+    from datetime import datetime, timezone
+
+    from sentiment.news_scraper import NewsArticle
+
+    article = NewsArticle("Gold soars to a record high", "Reuters", "https://ex.com/gold",
+                          datetime.now(timezone.utc), "")
+    monkeypatch.setattr(sm, "get_latest_news", lambda: [article])
+    monkeypatch.setattr(sm, "_news_fetched_at", None)
+    monkeypatch.setattr(sm, "_news_cache", [])
+    assert sm.get_recent_news() == [article]
+    stored = isolated_database.list_articles()[0][0]
+    assert stored["label"] == "bullish" and "record high" in stored["keywords"]
+    assert stored["symbols"] == {"XAUUSD": 1.0}

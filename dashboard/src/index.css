@@ -68,6 +68,9 @@
   --color-orange-500: #a87650;
 }
 
+/* Écrans peu hauts (téléphone en paysage) : ex. `short:static` libère la hauteur utile */
+@custom-variant short (@media (max-height: 30rem));
+
 /* -------------------------------------------------------------------------
    Safe areas (encoche, Dynamic Island, barre gestuelle iOS / Android).
    Actives grâce à `viewport-fit=cover` dans index.html ; valent 0 ailleurs.
@@ -105,10 +108,41 @@ html {
   text-size-adjust: 100%;
 }
 
+/* Échelle typographique : tout est en rem, donc polices, marges et largeurs suivent la taille racine */
+@media (max-width: 359px) {
+  html {
+    font-size: 15px; /* très petits téléphones (iPhone SE 1re génération...) */
+  }
+}
+@media (min-width: 1920px) {
+  html {
+    font-size: 17px; /* écrans Full HD et ultra-larges */
+  }
+}
+@media (min-width: 2560px) {
+  html {
+    font-size: 18px; /* 1440p, 4K mis à l'échelle */
+  }
+}
+
 body {
   @apply min-h-dvh bg-canvas text-slate-100 antialiased;
   font-feature-settings: "tnum" 1; /* chiffres à chasse fixe partout : pas de sauts lors des mises à jour */
   -webkit-tap-highlight-color: transparent;
+  overflow-x: clip; /* aucun défilement horizontal parasite ; les zones défilables gardent le leur */
+}
+
+/* Application installée (PWA) : comportement d'application native */
+@media (display-mode: standalone) {
+  body {
+    overscroll-behavior-y: none; /* pas de rebond ni de « tirer pour rafraîchir » */
+  }
+  button,
+  nav {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none; /* pas de menu contextuel sur un appui long */
+  }
 }
 
 /* Tactile : pas de délai de double-tap sur les contrôles */

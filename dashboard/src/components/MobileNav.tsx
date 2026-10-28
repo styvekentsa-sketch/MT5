@@ -20,7 +20,7 @@ interface MobileNavProps {
 export function MobileNav({ active, positionCount, onChange }: MobileNavProps) {
   return (
     <nav
-      className="pb-safe fixed inset-x-0 bottom-0 z-40 border-t border-line bg-canvas/95 lg:hidden"
+      className="pb-safe fixed inset-x-0 bottom-0 z-40 border-t border-line bg-canvas/95 md:hidden"
       aria-label="Navigation principale"
     >
       <ul className="mx-auto grid max-w-lg grid-cols-5">

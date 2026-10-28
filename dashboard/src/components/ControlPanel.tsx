@@ -104,8 +104,8 @@ export function ControlPanel({
   const segment = "min-h-11 flex-1 rounded-lg px-2 text-xs font-bold transition disabled:cursor-not-allowed lg:flex-none lg:px-3";
 
   return (
-    <header className="pt-safe sticky top-0 z-40 border-b border-line bg-canvas/95">
-      <div className="px-safe mx-auto flex max-w-7xl flex-col gap-3 py-3 lg:flex-row lg:items-center lg:justify-between lg:py-4">
+    <header className="pt-safe sticky top-0 z-40 short:static border-b border-line bg-canvas/95">
+      <div className="px-safe mx-auto flex max-w-7xl flex-col gap-3 py-3 2xl:max-w-[100rem] lg:flex-row lg:items-center lg:justify-between lg:py-4">
         {/* Identité + statut */}
         <div className="flex min-w-0 flex-col gap-2 lg:flex-row lg:items-center lg:gap-3">
           <div className="flex items-center justify-between gap-3">

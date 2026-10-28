@@ -187,6 +187,54 @@ def _rsi_component(rsi: float) -> tuple[float, str]:
 #  Signal technique
 # =============================================================================
 
+def signal_from_indicators(ind: pd.DataFrame, pos: int = -1) -> TechnicalSignal:
+    """
+    Signal technique à la bougie clôturée `pos` d'un DataFrame déjà enrichi par
+    `compute_indicators`. Ne lit que les lignes <= `pos` (aucune donnée future) :
+    le backtest calcule les indicateurs une seule fois puis appelle cette fonction
+    bougie par bougie, avec exactement la même notation que le bot en direct.
+    """
+    try:
+        pos = pos if pos >= 0 else len(ind) + pos
+        if pos < 1 or pos >= len(ind):
+            return _neutral("historique insuffisant")
+        last, prev = ind.iloc[pos], ind.iloc[pos - 1]
+        needed = ("close", "ema_fast", "ema_slow", "rsi", "macd_hist", "atr")
+        if any(pd.isna(last[c]) for c in needed) or pd.isna(prev["macd_hist"]):
+            return _neutral("indicateurs incomplets (NaN sur la dernière bougie)")
+
+        trend, trend_reason = _trend_component(last["close"], last["ema_fast"], last["ema_slow"])
+        momentum, momentum_reason = _momentum_component(last["macd_hist"], prev["macd_hist"])
+        rsi_value, rsi_reason = _rsi_component(last["rsi"])
+
+        score = TREND_WEIGHT * trend + MOMENTUM_WEIGHT * momentum + RSI_WEIGHT * rsi_value
+        score = max(-1.0, min(1.0, score))
+        if math.isnan(score):
+            return _neutral("score technique invalide")
+
+        signal: TechnicalAction = (
+            "BUY" if score >= SIGNAL_THRESHOLD else "SELL" if score <= -SIGNAL_THRESHOLD else "NEUTRAL"
+        )
+        swing_high, swing_low = swing_levels(ind.iloc[max(0, pos - SWING_LOOKBACK + 1):pos + 1])
+
+        return TechnicalSignal(
+            signal=signal,
+            score=round(score, 4),
+            close=float(last["close"]),
+            ema_fast=float(last["ema_fast"]),
+            ema_slow=float(last["ema_slow"]),
+            rsi=round(float(last["rsi"]), 2),
+            macd_hist=float(last["macd_hist"]),
+            atr=float(last["atr"]),
+            swing_high=swing_high,
+            swing_low=swing_low,
+            reasons=(trend_reason, momentum_reason, rsi_reason),
+        )
+    except Exception as exc:  # noqa: BLE001 - un bug d'indicateur ne doit pas arrêter le bot
+        log.exception("Erreur lors du calcul du signal technique")
+        return _neutral(f"erreur de calcul : {exc}")
+
+
 def technical_signal(df: pd.DataFrame | None) -> TechnicalSignal:
     """
     Calcule le signal technique court terme à partir des bougies OHLC.
@@ -206,40 +254,9 @@ def technical_signal(df: pd.DataFrame | None) -> TechnicalSignal:
             log.warning("Historique insuffisant : %d bougies clôturées (minimum %d)", len(candles), MIN_BARS)
             return _neutral(f"historique insuffisant ({len(candles)}/{MIN_BARS} bougies)")
 
-        ind = compute_indicators(candles)
-        last, prev = ind.iloc[-1], ind.iloc[-2]
-        needed = ("close", "ema_fast", "ema_slow", "rsi", "macd_hist", "atr")
-        if any(pd.isna(last[c]) for c in needed) or pd.isna(prev["macd_hist"]):
-            return _neutral("indicateurs incomplets (NaN sur la dernière bougie)")
-
-        trend, trend_reason = _trend_component(last["close"], last["ema_fast"], last["ema_slow"])
-        momentum, momentum_reason = _momentum_component(last["macd_hist"], prev["macd_hist"])
-        rsi_value, rsi_reason = _rsi_component(last["rsi"])
-
-        score = TREND_WEIGHT * trend + MOMENTUM_WEIGHT * momentum + RSI_WEIGHT * rsi_value
-        score = max(-1.0, min(1.0, score))
-        if math.isnan(score):
-            return _neutral("score technique invalide")
-
-        signal: TechnicalAction = (
-            "BUY" if score >= SIGNAL_THRESHOLD else "SELL" if score <= -SIGNAL_THRESHOLD else "NEUTRAL"
-        )
-        swing_high, swing_low = swing_levels(candles)
-
-        result = TechnicalSignal(
-            signal=signal,
-            score=round(score, 4),
-            close=float(last["close"]),
-            ema_fast=float(last["ema_fast"]),
-            ema_slow=float(last["ema_slow"]),
-            rsi=round(float(last["rsi"]), 2),
-            macd_hist=float(last["macd_hist"]),
-            atr=float(last["atr"]),
-            swing_high=swing_high,
-            swing_low=swing_low,
-            reasons=(trend_reason, momentum_reason, rsi_reason),
-        )
-        log.debug("Signal technique %s (%+.2f) : %s", signal, score, "; ".join(result.reasons))
+        result = signal_from_indicators(compute_indicators(candles))
+        if result.is_valid:
+            log.debug("Signal technique %s (%+.2f) : %s", result.signal, result.score, "; ".join(result.reasons))
         return result
     except Exception as exc:  # noqa: BLE001 - un bug d'indicateur ne doit pas arrêter le bot
         log.exception("Erreur lors du calcul du signal technique")

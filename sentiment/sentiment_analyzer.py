@@ -392,6 +392,18 @@ def relevant_symbols(text: str, symbols: Iterable[str]) -> dict[str, float]:
     return result
 
 
+def article_insights(title: str, snippet: str = "", symbols: Iterable[str] = ()) -> dict[str, Any]:
+    """Analyse complète d'un article : score, label, mots-clés détectés, symboles concernés."""
+    text = f"{title} {snippet}"
+    sentiment = analyze_article(title, snippet)
+    return {
+        "score": sentiment["score"],
+        "label": sentiment["label"],
+        "keywords": detect_keywords(text),
+        "symbols": relevant_symbols(text, symbols),
+    }
+
+
 def _field(item: Any, name: str) -> Any:
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
@@ -418,7 +430,7 @@ def analyze_article(title: str, snippet: str = "") -> dict[str, Any]:
     return {"score": score, "label": classify(score), "engine": get_engine().name}
 
 
-def analyze_news_items(news_items: Iterable[Any], symbol: str | None = None) -> float:
+def analyze_news_items(news_items: Iterable[Any], symbol: str | None = None, now: datetime | None = None) -> float:
     """
     Sentiment global pondéré d'une liste d'actualités, pour la stratégie.
 
@@ -432,6 +444,8 @@ def analyze_news_items(news_items: Iterable[Any], symbol: str | None = None) -> 
             > 0 = haussier pour la paire, < 0 = baissier (une bonne nouvelle sur USD
             pèse négativement sur EURUSD). Sans symbole : ton moyen des actualités
             concernant l'ensemble des symboles tradés, sans orientation.
+
+        now: instant de référence pour la fraîcheur (défaut : maintenant ; backtest : heure de la bougie).
 
     Returns:
         Score dans [-1, 1] ; 0.0 si aucun article pertinent ou en cas d'erreur.
@@ -447,7 +461,7 @@ def analyze_news_items(news_items: Iterable[Any], symbol: str | None = None) -> 
             base = quote = None
             watched = {a for s in settings.trading.symbols for a in split_symbol(s) if a}
 
-        now = datetime.now(timezone.utc)
+        now = now or datetime.now(timezone.utc)
         weighted_sum = total_weight = 0.0
         analyzed = 0
         for item in news_items or []:

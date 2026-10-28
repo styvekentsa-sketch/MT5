@@ -173,3 +173,24 @@ export interface WebhookLog {
   capacity: number;
   events: WebhookEvent[];
 }
+
+// --- Marché (GET /api/market/candles) ---
+
+export interface Candle {
+  /** Ouverture de la bougie, secondes Unix */
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface Candles {
+  symbol: string;
+  timeframe: string;
+  digits: number;
+  bid: number | null;
+  ask: number | null;
+  candles: Candle[];
+}

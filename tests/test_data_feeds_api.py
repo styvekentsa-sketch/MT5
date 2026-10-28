@@ -127,3 +127,60 @@ def test_data_feeds_sources(client, feeds):
 
 def test_data_feeds_requires_api_key(client):
     assert client.get("/api/data-feeds").status_code == 401
+
+
+# ----------------------------------------------------------------- notifications
+
+def test_webhook_notifications(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(webhooks, "notify", lambda title, message="", level=None, dedup_key=None:
+                        sent.append((title, dedup_key)) or True)
+    client.post(f"/api/webhooks/tradingview?token={TEST_WEBHOOK_SECRET}", json={"symbol": "EURUSD", "action": "buy"})
+    client.post("/api/webhooks/tradingview?token=faux", json={})
+    assert sent[0] == ("Webhook tradingview reçu", None)
+    assert sent[1][0] == "Webhook tradingview rejeté" and sent[1][1].startswith("webhook-rejected:tradingview:")
+
+
+# ----------------------------------------------------------------- persistance et historique
+
+def test_webhooks_persist_beyond_memory_log(client, isolated_database):
+    client.post(f"/api/webhooks/tradingview?token={TEST_WEBHOOK_SECRET}", json={"symbol": "EURUSD", "action": "buy"})
+    webhooks.webhook_log.clear()                                       # simule un redémarrage
+    events = client.get("/api/webhooks/events", headers=AUTH).json()["events"]
+    assert len(events) == 1 and events[0]["symbol"] == "EURUSD"
+    assert isolated_database.list_webhooks()[1] == 1
+
+
+def test_webhook_falls_back_to_memory_when_database_down(client, isolated_database):
+    isolated_database.close()
+    response = client.post(f"/api/webhooks/tradingview?token={TEST_WEBHOOK_SECRET}", json={"action": "sell"})
+    assert response.status_code == 202
+    assert client.get("/api/webhooks/events", headers=AUTH).json()["events"][0]["action"] == "SELL"
+
+
+def test_history_endpoints(client, isolated_database):
+    db = isolated_database
+    for i in range(3):
+        db.insert_webhook(source="tradingview", symbol="EURUSD", action="BUY", accepted=i != 1, reason="r",
+                          client="c", size_bytes=1, payload={"n": i})
+    db.insert_decision({"symbol": "EURUSD", "status": "traded", "action": "BUY", "volume": 0.5, "dry_run": True})
+    db.insert_decision({"symbol": "EURUSD", "status": "hold"})
+    db.insert_decision({"symbol": "XAUUSD", "status": "rejected", "detail": "spread"})
+    db.upsert_articles([{"link": "https://ex.com/a", "title": "Gold soars", "source": "R", "score": 0.6,
+                         "label": "bullish", "symbols": {"XAUUSD": 1.0}}])
+
+    webhooks_page = client.get("/api/history/webhooks?limit=2&accepted=true", headers=AUTH).json()
+    assert webhooks_page["total"] == 2 and len(webhooks_page["items"]) == 2
+    assert client.get("/api/history/trades?trades_only=true", headers=AUTH).json()["total"] == 2
+    page = client.get("/api/history/trades?status=hold&status=traded&symbol=EURUSD", headers=AUTH).json()
+    assert page["total"] == 2 and {i["status"] for i in page["items"]} == {"hold", "traded"}
+    articles = client.get("/api/history/sentiment?symbol=XAUUSD", headers=AUTH).json()
+    assert articles["total"] == 1 and articles["items"][0]["symbols"] == {"XAUUSD": 1.0}
+
+
+def test_history_validation_and_auth(client, isolated_database):
+    assert client.get("/api/history/trades").status_code == 401
+    assert client.get("/api/history/trades?status=unknown", headers=AUTH).status_code == 422
+    assert client.get("/api/history/trades?limit=0", headers=AUTH).status_code == 422
+    isolated_database.close()
+    assert client.get("/api/history/webhooks", headers=AUTH).status_code == 503

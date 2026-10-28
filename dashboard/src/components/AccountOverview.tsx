@@ -15,12 +15,12 @@ interface MetricCardProps {
 
 function MetricCard({ label, icon, value, sub, accent = "border-l-line-strong" }: MetricCardProps) {
   return (
-    <div className={`min-w-0 rounded-md border border-l-2 border-line bg-surface p-4 sm:px-5 ${accent}`}>
+    <div className={`min-w-0 rounded-md border border-l-2 border-line bg-surface px-4 py-3.5 sm:px-5 sm:py-4 ${accent}`}>
       <div className="flex items-center justify-between gap-2 text-[11px] font-medium tracking-[0.08em] text-slate-400 uppercase">
         <span className="truncate">{label}</span>
         <span className="shrink-0 text-slate-600">{icon}</span>
       </div>
-      <div className="mt-2 overflow-hidden font-mono text-[15px] font-medium text-ellipsis whitespace-nowrap text-white tabular-nums sm:mt-3 sm:text-[1.6rem] sm:leading-8">
+      <div className="mt-1.5 overflow-hidden font-mono text-xl font-medium text-ellipsis whitespace-nowrap text-white tabular-nums sm:mt-3 sm:text-2xl xl:text-[1.6rem] xl:leading-8">
         {value}
       </div>
       {sub && <div className="mt-1 text-[11px] text-slate-400 tabular-nums sm:text-xs">{sub}</div>}
@@ -32,7 +32,7 @@ function MetricCard({ label, icon, value, sub, accent = "border-l-line-strong" }
 export function AccountOverview({ account }: { account: Account | null }) {
   if (!account) {
     return (
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 xl:grid-cols-4">
         {Array.from({ length: 4 }, (_, i) => (
           <div key={i} className="rounded-md border border-line bg-surface p-5">
             <Skeleton className="h-3 w-24" />
@@ -49,7 +49,7 @@ export function AccountOverview({ account }: { account: Account | null }) {
   const dailyUp = account.daily_pl >= 0;
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:gap-4 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 xl:grid-cols-4">
       <MetricCard
         label="Solde"
         icon={<Landmark className="size-4" />}

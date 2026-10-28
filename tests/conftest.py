@@ -35,9 +35,20 @@ os.environ.update({
     "WEBHOOK_SECRET": TEST_WEBHOOK_SECRET,
     "LOG_LEVEL": "WARNING",
     "LOG_DIR": str(Path(tempfile.gettempdir()) / "mt5bot-tests-logs"),
+    "DB_PATH": str(Path(tempfile.gettempdir()) / "mt5bot-tests.db"),
 })
 
 from brokers.mt5_client import AccountInfo, SymbolSpecs, Tick  # noqa: E402
+from utils import database  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_database(monkeypatch):
+    """Chaque test dispose d'une base SQLite en mémoire, vide et isolée."""
+    db = database.Database(database.MEMORY)
+    monkeypatch.setattr(database, "_database", db)
+    yield db
+    db.close()
 
 
 @pytest.fixture

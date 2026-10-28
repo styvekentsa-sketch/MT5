@@ -23,7 +23,7 @@ export default defineConfig({
         scope: "/",
         display: "standalone",
         display_override: ["standalone", "minimal-ui"],
-        orientation: "portrait",
+        orientation: "any",       // portrait et paysage : téléphones, tablettes, écrans de bureau
         theme_color: THEME_COLOR,
         background_color: THEME_COLOR,
         categories: ["finance", "productivity"],

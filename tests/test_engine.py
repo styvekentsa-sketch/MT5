@@ -124,3 +124,79 @@ def test_run_loop_stops_cleanly(pipeline, monkeypatch):
     engine.step = step_then_stop
     assert engine.run() is True
     assert engine.cycle_count == 1 and shutdowns == [True] and not engine.is_running
+
+
+# ----------------------------------------------------------------- notifications
+
+@pytest.fixture
+def alerts(monkeypatch):
+    sent: list[dict] = []
+    monkeypatch.setattr(eng, "notify", lambda title, message="", level=None, dedup_key=None:
+                        sent.append({"title": title, "message": message, "level": level, "key": dedup_key}) or True)
+    return sent
+
+
+def test_blocked_trades_raise_deduplicated_alerts(pipeline, alerts):
+    state, _ = pipeline
+    engine = TradingEngine(symbols=["EURUSD"])
+    state["news"] = True
+    engine.step()
+    state.update(news=False, approved=False)
+    engine.step()
+    state.update(approved=True, volume=0.0)
+    engine.step()
+    assert [a["key"] for a in alerts] == ["Calendrier économique:EURUSD", "Risque:EURUSD", "Risque:EURUSD"]
+    assert all(a["title"] == "Trade bloqué · EURUSD" and a["level"] == eng.Level.WARNING for a in alerts)
+
+
+def test_no_alert_for_normal_trade_or_hold(pipeline, alerts):
+    state, _ = pipeline
+    TradingEngine(symbols=["EURUSD"]).step()
+    state["decision"] = {"action": "HOLD", "confidence": 10, "reason": "faible"}
+    TradingEngine(symbols=["EURUSD"]).step()
+    assert alerts == []
+
+
+def test_start_and_stop_alerts(pipeline, alerts, monkeypatch):
+    monkeypatch.setattr(eng, "connect_mt5", lambda: True)
+    monkeypatch.setattr(eng, "shutdown_mt5", lambda: None)
+    monkeypatch.setattr(eng.TradingEngine, "_install_signal_handlers", lambda self: None)
+    engine = TradingEngine(symbols=["EURUSD"], interval_seconds=1)
+    engine.step = lambda: engine.stop() or []
+    engine.run()
+    assert [a["title"] for a in alerts] == ["Bot démarré", "Bot arrêté"]
+
+
+def test_failed_start_alert(alerts, monkeypatch):
+    monkeypatch.setattr(eng, "connect_mt5", lambda: False)
+    monkeypatch.setattr(eng.TradingEngine, "_install_signal_handlers", lambda self: None)
+    assert TradingEngine(symbols=["EURUSD"]).run() is False
+    assert alerts[0]["title"] == "Démarrage impossible" and alerts[0]["level"] == eng.Level.CRITICAL
+
+
+# ----------------------------------------------------------------- historique des décisions
+
+def test_every_decision_is_recorded(pipeline, isolated_database, monkeypatch):
+    state, _ = pipeline
+    state["decision"] = dict(state["decision"], technical_score=0.9, sentiment_score=0.1, hybrid_score=0.66)
+
+    def evaluate(symbol):
+        if symbol == "GBPUSD":
+            raise RuntimeError("bug")
+        return dict(state["decision"], symbol=symbol)
+
+    monkeypatch.setattr(eng, "evaluate_market", evaluate)
+    TradingEngine(symbols=["EURUSD", "GBPUSD"]).step()
+    items, total = isolated_database.list_decisions()
+    by_symbol = {i["symbol"]: i for i in items}
+    assert total == 2
+    traded = by_symbol["EURUSD"]
+    assert traded["status"] == "traded" and traded["action"] == "BUY" and traded["volume"] == 0.5
+    assert traded["hybrid_score"] == 0.66 and traded["sl"] == 1.098 and traded["ticket"] == -1
+    assert traded["cycle"] == 1 and traded["dry_run"] is True
+    assert by_symbol["GBPUSD"]["status"] == "error" and "bug" in by_symbol["GBPUSD"]["detail"]
+
+
+def test_database_failure_never_breaks_the_cycle(pipeline, isolated_database):
+    isolated_database.close()
+    assert [o.status for o in TradingEngine(symbols=["EURUSD"]).step()] == ["traded"]

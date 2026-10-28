@@ -1,5 +1,6 @@
 import type {
   Account,
+  Candles,
   ClosedPosition,
   ControlResult,
   DataFeeds,
@@ -149,6 +150,12 @@ export const api = {
       timeoutMs: SENTIMENT_TIMEOUT_MS,
     }),
   webhookEvents: (c: Connection, signal?: AbortSignal) => request<WebhookLog>(c, "/api/webhooks/events", { signal }),
+  candles: (c: Connection, symbol: string, timeframe: string, count: number, signal?: AbortSignal) =>
+    request<Candles>(
+      c,
+      `/api/market/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&count=${count}`,
+      { signal },
+    ),
 
   start: (c: Connection) => request<ControlResult>(c, "/api/control/start", { method: "POST" }),
   stop: (c: Connection) => request<ControlResult>(c, "/api/control/stop", { method: "POST" }),

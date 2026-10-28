@@ -61,6 +61,19 @@ export function useInstallPrompt() {
   };
 }
 
+/** Vrai tant que la media query correspond (ex : "(min-width: 1024px)" pour la mise en page bureau). */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [query]);
+  return matches;
+}
+
 /** État réseau de l'appareil (événements online / offline). */
 export function useOnlineStatus(): boolean {
   const [online, setOnline] = useState(() => navigator.onLine);

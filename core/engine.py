@@ -22,16 +22,18 @@ from __future__ import annotations
 import signal
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
 from brokers.mt5_client import connect_mt5, ensure_connection, execute_order, is_dry_run, shutdown_mt5
 from config.settings import settings
 from risk.risk_manager import calculate_position_size, validate_trade_risk
-from sentiment.news_scraper import is_high_impact_news_imminent
+from sentiment.news_scraper import get_upcoming_high_impact_events, is_high_impact_news_imminent
 from strategies.strategy_manager import evaluate_market
+from utils.database import get_database
 from utils.logger import get_logger
+from utils.notifier import Level, get_notifier, notify
 
 log = get_logger(__name__)
 
@@ -47,6 +49,7 @@ TIMEFRAME_SECONDS: dict[str, int] = {
     "H4": 14_400, "D1": 86_400, "W1": 604_800, "MN1": 2_592_000,
 }
 ORDER_COMMENT_PREFIX = "Bot"
+NOTIFY_FLUSH_TIMEOUT_SECONDS = 5      # délai laissé aux alertes en file avant la fin du processus
 
 
 # =============================================================================
@@ -58,6 +61,10 @@ class SymbolOutcome:
     symbol: str
     status: OutcomeStatus
     detail: str = ""
+    # Contexte de la décision, historisé dans la table trade_decisions
+    decision: dict[str, Any] | None = field(default=None, compare=False, repr=False)
+    volume: float | None = None
+    ticket: int | None = None
 
 
 # =============================================================================
@@ -105,6 +112,7 @@ class TradingEngine:
         log.info("Démarrage du moteur (%s) :\n%s", "PAPER" if is_dry_run() else "LIVE", settings.summary())
         if not connect_mt5():
             log.critical("Connexion à MT5 impossible : arrêt du moteur")
+            notify("Démarrage impossible", "Connexion à MetaTrader 5 impossible : le bot s'est arrêté.", Level.CRITICAL)
             return False
         return True
 
@@ -165,12 +173,16 @@ class TradingEngine:
         self._stop_event.clear()
         self._install_signal_handlers()
         if not self.start():
+            get_notifier().flush(NOTIFY_FLUSH_TIMEOUT_SECONDS)
             return False
 
         log.info("Boucle démarrée : %s | un tour toutes les %ds | 1 trade max par symbole toutes les %ds",
                  ", ".join(self.symbols), self.interval_seconds, self.trade_cooldown_seconds)
         self._loop_active = True
         self.started_at = datetime.now(timezone.utc)
+        get_database().purge_older_than(settings.database.retention_days)
+        notify("Bot démarré", f"Mode {'PAPER' if is_dry_run() else 'LIVE'} · {', '.join(self.symbols)} "
+                              f"({settings.trading.timeframe}) · compte {settings.mt5.account}")
         try:
             while not self._stop_event.is_set():
                 started = time.monotonic()
@@ -187,6 +199,8 @@ class TradingEngine:
             self._loop_active = False
             shutdown_mt5()
             log.info("Moteur arrêté après %d tour(s)", self._cycle)
+            notify("Bot arrêté", f"Arrêt propre après {self._cycle} tour(s).", Level.WARNING)
+            get_notifier().flush(NOTIFY_FLUSH_TIMEOUT_SECONDS)
         return True
 
     # ------------------------------------------------------------------ un tour de boucle
@@ -211,6 +225,7 @@ class TradingEngine:
                 log.exception("[%s] Erreur inattendue pendant le traitement", symbol)
                 outcome = SymbolOutcome(symbol, "error", str(exc))
             outcomes.append(outcome)
+            self._record_decision(outcome)
 
         duration = time.monotonic() - started
         self.last_cycle_at = datetime.now(timezone.utc)
@@ -228,11 +243,47 @@ class TradingEngine:
         last = self._last_trade_at.get(symbol)
         return last is not None and time.monotonic() - last < self.trade_cooldown_seconds
 
+    def _record_decision(self, outcome: SymbolOutcome) -> None:
+        """Historise la décision (table trade_decisions) ; une erreur de base n'arrête jamais le tour."""
+        try:
+            decision = outcome.decision or {}
+            get_database().insert_decision({
+                "cycle": self._cycle,
+                "symbol": outcome.symbol,
+                "status": outcome.status,
+                "action": decision.get("action"),
+                "confidence": decision.get("confidence"),
+                "technical_score": decision.get("technical_score"),
+                "sentiment_score": decision.get("sentiment_score"),
+                "hybrid_score": decision.get("hybrid_score"),
+                "entry_price": decision.get("entry_price"),
+                "sl": decision.get("suggested_sl"),
+                "tp": decision.get("suggested_tp"),
+                "volume": outcome.volume,
+                "ticket": outcome.ticket,
+                "dry_run": is_dry_run(),
+                "detail": outcome.detail or decision.get("reason", ""),
+            })
+        except Exception:  # noqa: BLE001
+            log.exception("[%s] Historisation de la décision impossible", outcome.symbol)
+
+    def _alert_blocked(self, symbol: str, cause: str, detail: str) -> None:
+        """Alerte « trade bloqué », limitée à une par symbole et par cause pendant NOTIFY_COOLDOWN_SECONDS."""
+        notify(f"Trade bloqué · {symbol}", f"{cause} : {detail}", Level.WARNING, dedup_key=f"{cause}:{symbol}")
+
+    def _news_detail(self, symbol: str) -> str:
+        """Annonces responsables du blocage (lues seulement si une alerte peut partir)."""
+        if not get_notifier().enabled:
+            return ""
+        events = get_upcoming_high_impact_events(symbol=symbol) or []
+        return ", ".join(f"{e.title} ({e.currency}, {e.time:%H:%M} UTC)" for e in events) or "annonce à fort impact"
+
     def _process_symbol(self, symbol: str) -> SymbolOutcome:
         """Étapes A à D pour un symbole."""
         # A. Sécurité news
         if is_high_impact_news_imminent(symbol=symbol):
             log.info("[%s] Annonce à fort impact imminente : symbole ignoré ce tour", symbol)
+            self._alert_blocked(symbol, "Calendrier économique", self._news_detail(symbol))
             return SymbolOutcome(symbol, "news_blocked")
 
         # B. Évaluation stratégique
@@ -240,37 +291,40 @@ class TradingEngine:
         action = decision.get("action", "HOLD")
         if action not in ("BUY", "SELL"):
             log.info("[%s] HOLD (confiance %s%%)", symbol, decision.get("confidence", 0))
-            return SymbolOutcome(symbol, "hold", str(decision.get("reason", "")))
+            return SymbolOutcome(symbol, "hold", str(decision.get("reason", "")), decision)
 
         if self._in_cooldown(symbol):
             log.info("[%s] Signal %s ignoré : un trade a déjà été ouvert sur cette bougie", symbol, action)
-            return SymbolOutcome(symbol, "cooldown")
+            return SymbolOutcome(symbol, "cooldown", decision=decision)
 
         # C. Taille de position et validation du risque
         entry = decision.get("entry_price")
         sl, tp = decision.get("suggested_sl"), decision.get("suggested_tp")
         if entry is None or sl is None:
             log.warning("[%s] Signal %s sans prix d'entrée ou SL : trade abandonné", symbol, action)
-            return SymbolOutcome(symbol, "rejected", "prix d'entrée ou SL manquant")
+            return SymbolOutcome(symbol, "rejected", "prix d'entrée ou SL manquant", decision)
 
         volume = calculate_position_size(symbol, entry, sl)
         if volume <= 0:
             log.warning("[%s] Signal %s abandonné : taille de position nulle", symbol, action)
-            return SymbolOutcome(symbol, "rejected", "taille de position nulle")
+            self._alert_blocked(symbol, "Risque", f"signal {action} abandonné, taille de position nulle")
+            return SymbolOutcome(symbol, "rejected", "taille de position nulle", decision, volume=0.0)
 
         check = validate_trade_risk(symbol, action, volume, sl, tp)
         if not check.get("is_approved"):
-            return SymbolOutcome(symbol, "rejected", str(check.get("reason", "")))
+            self._alert_blocked(symbol, "Risque", f"signal {action} refusé, {check.get('reason', '')}")
+            return SymbolOutcome(symbol, "rejected", str(check.get("reason", "")), decision, volume=volume)
 
         # D. Exécution
         comment = f"{ORDER_COMMENT_PREFIX} {action} {decision.get('confidence', 0)}%"
         result = execute_order(symbol, action, volume, sl=sl, tp=tp, comment=comment)
         if not result.success:
             log.error("[%s] Échec de l'ordre %s %.2f : %s", symbol, action, volume, result.message)
-            return SymbolOutcome(symbol, "failed", result.message)
+            return SymbolOutcome(symbol, "failed", result.message, decision, volume=volume)
 
         self._last_trade_at[symbol] = time.monotonic()
         log.info("[%s] %s%s %.2f lot(s) @ %s | SL %s | TP %s | ticket #%d | confiance %s%%",
                  symbol, "[DRY RUN] " if result.dry_run else "", action, result.volume,
                  result.price, result.sl, result.tp, result.ticket, decision.get("confidence", 0))
-        return SymbolOutcome(symbol, "traded", f"ticket #{result.ticket}")
+        return SymbolOutcome(symbol, "traded", f"ticket #{result.ticket}", decision,
+                             volume=result.volume, ticket=result.ticket)

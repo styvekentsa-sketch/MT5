@@ -23,10 +23,11 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from decimal import ROUND_FLOOR, Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from brokers.mt5_client import (
     AccountInfo,
+    ClosedDeal,
     SymbolSpecs,
     Tick,
     calc_margin,
@@ -53,6 +54,54 @@ RISK_TOLERANCE = 1.05                # perte au SL tolérée jusqu'à 105 % du b
 MAX_MARGIN_USAGE = 0.90              # marge requise <= 90 % de la marge libre
 VOLUME_EPSILON = 1e-9
 VOLUME_DECIMALS = 8                  # absorbe les erreurs d'arrondi flottant avant l'arrondi au pas
+
+
+# =============================================================================
+#  Accès au broker (MT5 en réel, broker simulé en backtest)
+# =============================================================================
+
+class Broker(Protocol):
+    """Données de marché et de compte nécessaires aux règles de risque."""
+
+    def now(self) -> datetime: ...
+    def get_account_info(self) -> AccountInfo | None: ...
+    def get_symbol_specs(self, symbol: str) -> SymbolSpecs | None: ...
+    def get_current_tick(self, symbol: str) -> Tick | None: ...
+    def get_open_positions(self) -> list[Any]: ...
+    def get_closed_deals(self, since: datetime) -> list[ClosedDeal]: ...
+    def calc_profit(self, side: str, symbol: str, volume: float, price_open: float, price_close: float) -> float | None: ...
+    def calc_margin(self, side: str, symbol: str, volume: float, price: float) -> float | None: ...
+
+
+class _LiveBroker:
+    """Terminal MetaTrader 5 (fonctions de brokers.mt5_client, résolues à chaque appel)."""
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def get_account_info(self) -> AccountInfo | None:
+        return get_account_info()
+
+    def get_symbol_specs(self, symbol: str) -> SymbolSpecs | None:
+        return get_symbol_specs(symbol)
+
+    def get_current_tick(self, symbol: str) -> Tick | None:
+        return get_current_tick(symbol)
+
+    def get_open_positions(self) -> list[Any]:
+        return get_open_positions()
+
+    def get_closed_deals(self, since: datetime) -> list[ClosedDeal]:
+        return get_closed_deals(since)
+
+    def calc_profit(self, side: str, symbol: str, volume: float, price_open: float, price_close: float) -> float | None:
+        return calc_profit(side, symbol, volume, price_open, price_close)
+
+    def calc_margin(self, side: str, symbol: str, volume: float, price: float) -> float | None:
+        return calc_margin(side, symbol, volume, price)
+
+
+LIVE_BROKER: Broker = _LiveBroker()
 
 
 # =============================================================================
@@ -88,12 +137,13 @@ def _volume_bounds(specs: SymbolSpecs) -> tuple[float, float]:
     return max(specs.volume_min, settings.risk.min_lot), min(specs.volume_max, settings.risk.max_lot)
 
 
-def _loss_per_lot(symbol: str, side: str, entry: float, sl: float, specs: SymbolSpecs) -> float | None:
+def _loss_per_lot(symbol: str, side: str, entry: float, sl: float, specs: SymbolSpecs,
+                  broker: Broker) -> float | None:
     """
     Perte (devise du compte) pour 1 lot si le SL est touché.
     Calcul broker (`order_calc_profit`, conversions incluses), sinon via la valeur du tick.
     """
-    profit = calc_profit(side, symbol, 1.0, entry, sl)
+    profit = broker.calc_profit(side, symbol, 1.0, entry, sl)
     if profit is not None and profit < 0:
         return -profit
     if specs.tick_size > 0 and specs.tick_value > 0:
@@ -106,7 +156,7 @@ def _loss_per_lot(symbol: str, side: str, entry: float, sl: float, specs: Symbol
 #  Calcul de la taille de position
 # =============================================================================
 
-def calculate_position_size(symbol: str, entry_price: float, sl_price: float) -> float:
+def calculate_position_size(symbol: str, entry_price: float, sl_price: float, broker: Broker | None = None) -> float:
     """
     Volume (lots) tel que la perte au Stop Loss vaille `risk_per_trade_pct` % du capital.
 
@@ -118,6 +168,7 @@ def calculate_position_size(symbol: str, entry_price: float, sl_price: float) ->
         Le volume, ou 0.0 = ne pas trader : prix invalides, compte/symbole indisponible,
         ou lot minimal (broker / RISK_MIN_LOT) qui ferait dépasser le risque autorisé.
     """
+    broker = broker or LIVE_BROKER
     try:
         if not _valid_price(entry_price) or not _valid_price(sl_price):
             log.error("[%s] Prix invalides (entrée %r, SL %r) : volume 0", symbol, entry_price, sl_price)
@@ -127,15 +178,15 @@ def calculate_position_size(symbol: str, entry_price: float, sl_price: float) ->
             return 0.0
         side = "BUY" if sl_price < entry_price else "SELL"
 
-        account = get_account_info()
+        account = broker.get_account_info()
         if account is None or _risk_capital(account) <= 0:
             log.error("[%s] Capital indisponible ou nul : volume 0", symbol)
             return 0.0
-        specs = get_symbol_specs(symbol)
+        specs = broker.get_symbol_specs(symbol)
         if specs is None:
             return 0.0
 
-        loss_per_lot = _loss_per_lot(symbol, side, entry_price, sl_price, specs)
+        loss_per_lot = _loss_per_lot(symbol, side, entry_price, sl_price, specs, broker)
         if not loss_per_lot or loss_per_lot <= 0:
             log.error("[%s] Perte par lot incalculable : volume 0", symbol)
             return 0.0
@@ -170,9 +221,9 @@ def _check_spread(tick: Tick) -> list[str]:
     return []
 
 
-def _check_exposure(symbol: str) -> list[str]:
+def _check_exposure(symbol: str, broker: Broker) -> list[str]:
     """Nombre de positions du bot, au total et sur ce symbole."""
-    positions = get_open_positions()
+    positions = broker.get_open_positions()
     failures = []
     if len(positions) >= settings.risk.max_open_positions:
         failures.append(f"{len(positions)} positions ouvertes (maximum {settings.risk.max_open_positions})")
@@ -183,13 +234,13 @@ def _check_exposure(symbol: str) -> list[str]:
     return failures
 
 
-def _check_daily_limits(account: AccountInfo) -> list[str]:
+def _check_daily_limits(account: AccountInfo, broker: Broker) -> list[str]:
     """
     Perte journalière (réalisée depuis 00:00 UTC + latente, tout le compte) et
     série de pertes consécutives du bot sur la journée.
     """
-    start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    deals = get_closed_deals(start_of_day)
+    start_of_day = broker.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    deals = broker.get_closed_deals(start_of_day)
     realized = sum(d.net_profit for d in deals)
     start_balance = account.balance - realized
     failures = []
@@ -256,11 +307,11 @@ def _check_stops(side: str, tick: Tick, entry: float, sl: float, tp: float | Non
 
 def _check_risk_and_margin(
     symbol: str, side: str, volume: float, entry: float, sl: float,
-    account: AccountInfo, specs: SymbolSpecs,
+    account: AccountInfo, specs: SymbolSpecs, broker: Broker,
 ) -> tuple[list[str], float | None]:
     """Perte au SL comparée au budget de risque, et marge requise vs marge libre."""
     failures = []
-    loss_per_lot = _loss_per_lot(symbol, side, entry, sl, specs)
+    loss_per_lot = _loss_per_lot(symbol, side, entry, sl, specs, broker)
     potential_loss = loss_per_lot * volume if loss_per_lot else None
     budget = _risk_budget(account)
 
@@ -270,7 +321,7 @@ def _check_risk_and_margin(
         failures.append(f"perte au SL {potential_loss:.2f} {account.currency} > budget {budget:.2f} "
                         f"({settings.risk.risk_per_trade_pct}% du capital)")
 
-    margin = calc_margin(side, symbol, volume, entry)
+    margin = broker.calc_margin(side, symbol, volume, entry)
     if margin is None:
         failures.append("marge requise incalculable")
     elif margin > account.margin_free * MAX_MARGIN_USAGE:
@@ -309,7 +360,8 @@ def _verdict(
     }
 
 
-def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: float | None) -> dict[str, Any]:
+def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: float | None,
+                        broker: Broker | None = None) -> dict[str, Any]:
     """
     Vérifie qu'un ordre respecte toutes les règles de risque avant son envoi.
 
@@ -324,7 +376,10 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
         dict avec `is_approved` (bool), `reason` (motif lisible, toutes violations
         listées), `failed_checks`, `entry_price`, `risk_amount`, `risk_pct` et les
         paramètres de l'ordre. Toute erreur ou donnée manquante => `is_approved: False`.
+
+    `broker` : source des données (MT5 réel par défaut, broker simulé en backtest).
     """
+    broker = broker or LIVE_BROKER
     side = action.strip().upper() if isinstance(action, str) else ""
     try:
         # 1. Paramètres de l'ordre
@@ -338,7 +393,7 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
             return _verdict(symbol, side, volume, sl, tp, [f"volume invalide : {volume!r}"])
 
         # 2. Compte, symbole, prix
-        account = get_account_info()
+        account = broker.get_account_info()
         if account is None:
             return _verdict(symbol, side, volume, sl, tp, ["informations du compte indisponibles"])
         capital = _risk_capital(account)
@@ -346,12 +401,12 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
             return _verdict(symbol, side, volume, sl, tp,
                             [f"capital insuffisant (fonds propres {account.equity:.2f}, "
                              f"marge libre {account.margin_free:.2f})"])
-        specs = get_symbol_specs(symbol)
+        specs = broker.get_symbol_specs(symbol)
         if specs is None:
             return _verdict(symbol, side, volume, sl, tp, ["symbole inconnu ou indisponible"])
         if not specs.trade_allowed:
             return _verdict(symbol, side, volume, sl, tp, ["trading désactivé sur ce symbole"])
-        tick = get_current_tick(symbol)
+        tick = broker.get_current_tick(symbol)
         if tick is None or tick.ask < tick.bid:
             return _verdict(symbol, side, volume, sl, tp, ["prix indisponible ou incohérent (marché fermé ?)"])
         entry = tick.ask if side == "BUY" else tick.bid
@@ -359,12 +414,12 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
         # 3. Règles de risque (toutes évaluées pour un motif complet)
         failures = (
             _check_spread(tick)
-            + _check_exposure(symbol)
-            + _check_daily_limits(account)
+            + _check_exposure(symbol, broker)
+            + _check_daily_limits(account, broker)
             + _check_volume(volume, specs)
             + _check_stops(side, tick, entry, sl, tp, specs)
         )
-        risk_failures, potential_loss = _check_risk_and_margin(symbol, side, volume, entry, sl, account, specs)
+        risk_failures, potential_loss = _check_risk_and_margin(symbol, side, volume, entry, sl, account, specs, broker)
         failures += risk_failures
         return _verdict(symbol, side, volume, sl, tp, failures, entry, potential_loss, capital)
     except Exception as exc:  # noqa: BLE001 - MT5ConnectionError, données broker inattendues...
