@@ -54,6 +54,7 @@ RISK_TOLERANCE = 1.05                # perte au SL tolérée jusqu'à 105 % du b
 MAX_MARGIN_USAGE = 0.90              # marge requise <= 90 % de la marge libre
 VOLUME_EPSILON = 1e-9
 VOLUME_DECIMALS = 8                  # absorbe les erreurs d'arrondi flottant avant l'arrondi au pas
+POSITION_TYPE_BUY = 0                # valeur de mt5.POSITION_TYPE_BUY
 
 
 # =============================================================================
@@ -308,7 +309,7 @@ def _check_stops(side: str, tick: Tick, entry: float, sl: float, tp: float | Non
 def _check_risk_and_margin(
     symbol: str, side: str, volume: float, entry: float, sl: float,
     account: AccountInfo, specs: SymbolSpecs, broker: Broker,
-) -> tuple[list[str], float | None]:
+) -> tuple[list[str], float | None, float | None]:
     """Perte au SL comparée au budget de risque, et marge requise vs marge libre."""
     failures = []
     loss_per_lot = _loss_per_lot(symbol, side, entry, sl, specs, broker)
@@ -327,7 +328,68 @@ def _check_risk_and_margin(
     elif margin > account.margin_free * MAX_MARGIN_USAGE:
         failures.append(f"marge requise {margin:.2f} > {MAX_MARGIN_USAGE:.0%} de la marge libre "
                         f"({account.margin_free:.2f} {account.currency})")
-    return failures, potential_loss
+    return failures, potential_loss, margin
+
+
+def _position_side(position: Any) -> str:
+    """BUY / SELL pour une position MT5 (`type` 0 = achat) ou simulée (`side`)."""
+    side = getattr(position, "side", None)
+    if side in ("BUY", "SELL"):
+        return side
+    return "BUY" if getattr(position, "type", None) == POSITION_TYPE_BUY else "SELL"
+
+
+def open_positions_risk(broker: Broker) -> tuple[float, list[str]]:
+    """
+    Perte totale (devise du compte) si les SL de toutes les positions du bot étaient touchés.
+    Une position sans SL rend le risque non borné : elle est signalée dans la liste retournée.
+    Une position dont le SL est déjà au-delà du prix d'entrée (gain verrouillé) compte pour 0.
+    """
+    total, unbounded = 0.0, []
+    for position in broker.get_open_positions():
+        sl = getattr(position, "sl", None)
+        entry = getattr(position, "price_open", None) or getattr(position, "entry_price", None)
+        label = f"{getattr(position, 'symbol', '?')} #{getattr(position, 'ticket', '?')}"
+        if not _valid_price(sl) or not _valid_price(entry):
+            unbounded.append(label)
+            continue
+        profit = broker.calc_profit(_position_side(position), position.symbol, position.volume, entry, sl)
+        if profit is None:
+            unbounded.append(label)
+        elif profit < 0:
+            total += -profit
+    return total, unbounded
+
+
+def _check_portfolio(
+    potential_loss: float | None, margin: float | None, account: AccountInfo, broker: Broker,
+) -> tuple[list[str], float | None]:
+    """
+    Règles globales, indispensables avec plusieurs positions simultanées :
+      - risque cumulé (tous les SL touchés, nouveau trade compris) <= RISK_MAX_TOTAL_RISK_PCT
+      - marge totale après le trade <= RISK_MAX_MARGIN_USAGE_PCT des fonds propres
+    Retourne les violations et le risque cumulé en % du capital.
+    """
+    failures = []
+    capital = _risk_capital(account)
+    open_risk, unbounded = open_positions_risk(broker)
+    if unbounded:
+        failures.append(f"risque global non borné : position(s) sans SL ({', '.join(unbounded)})")
+
+    total_risk_pct = None
+    if potential_loss is not None and capital > 0:
+        total_risk_pct = (open_risk + potential_loss) / capital * 100
+        limit = settings.risk.max_total_risk_pct
+        if total_risk_pct > limit * RISK_TOLERANCE:
+            failures.append(f"risque cumulé {total_risk_pct:.2f}% > limite {limit}% "
+                            f"(positions ouvertes {open_risk / capital * 100:.2f}% + ce trade)")
+
+    if margin is not None and account.equity > 0:
+        usage_pct = (account.margin + margin) / account.equity * 100
+        if usage_pct > settings.risk.max_margin_usage_pct:
+            failures.append(f"marge totale {usage_pct:.1f}% des fonds propres après ce trade "
+                            f"> limite {settings.risk.max_margin_usage_pct}%")
+    return failures, total_risk_pct
 
 
 # =============================================================================
@@ -337,6 +399,7 @@ def _check_risk_and_margin(
 def _verdict(
     symbol: str, action: str, volume: Any, sl: Any, tp: Any, failures: list[str],
     entry: float | None = None, potential_loss: float | None = None, capital: float | None = None,
+    total_risk_pct: float | None = None,
 ) -> dict[str, Any]:
     approved = not failures
     reason = "toutes les règles de risque sont respectées" if approved else "; ".join(failures)
@@ -356,6 +419,7 @@ def _verdict(
         "entry_price": entry,
         "risk_amount": round(potential_loss, 2) if potential_loss is not None else None,
         "risk_pct": round(potential_loss / capital * 100, 3) if potential_loss and capital else None,
+        "portfolio_risk_pct": round(total_risk_pct, 3) if total_risk_pct is not None else None,
         "failed_checks": failures,
     }
 
@@ -419,9 +483,11 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
             + _check_volume(volume, specs)
             + _check_stops(side, tick, entry, sl, tp, specs)
         )
-        risk_failures, potential_loss = _check_risk_and_margin(symbol, side, volume, entry, sl, account, specs, broker)
-        failures += risk_failures
-        return _verdict(symbol, side, volume, sl, tp, failures, entry, potential_loss, capital)
+        risk_failures, potential_loss, margin = _check_risk_and_margin(
+            symbol, side, volume, entry, sl, account, specs, broker)
+        portfolio_failures, total_risk_pct = _check_portfolio(potential_loss, margin, account, broker)
+        failures += risk_failures + portfolio_failures
+        return _verdict(symbol, side, volume, sl, tp, failures, entry, potential_loss, capital, total_risk_pct)
     except Exception as exc:  # noqa: BLE001 - MT5ConnectionError, données broker inattendues...
         log.exception("[%s] Erreur pendant la validation du risque", symbol)
         return _verdict(symbol, side or str(action), volume, sl, tp, [f"erreur interne : {exc}"])

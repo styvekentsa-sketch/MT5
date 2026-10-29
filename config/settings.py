@@ -61,8 +61,10 @@ class RiskConfig:
     risk_per_trade_pct: float
     max_daily_loss_pct: float
     max_consecutive_losses: int
-    max_open_positions: int
+    max_open_positions: int          # positions simultanées du bot, toutes paires confondues
     max_positions_per_symbol: int
+    max_total_risk_pct: float        # somme des pertes si tous les SL sont touchés (positions + nouveau trade)
+    max_margin_usage_pct: float      # marge totale utilisée après le trade, en % des fonds propres
     max_spread_points: int
     sl_atr_multiplier: float
     tp_atr_multiplier: float
@@ -78,6 +80,14 @@ class RiskConfig:
             raise ConfigError("RISK_MAX_CONSECUTIVE_LOSSES doit être >= 1")
         if self.max_open_positions < 1 or self.max_positions_per_symbol < 1:
             raise ConfigError("Les limites de positions doivent être >= 1")
+        if self.max_open_positions > 20:
+            raise ConfigError("RISK_MAX_OPEN_POSITIONS doit être <= 20")
+        if self.max_positions_per_symbol > self.max_open_positions:
+            raise ConfigError("RISK_MAX_POSITIONS_PER_SYMBOL ne peut pas dépasser RISK_MAX_OPEN_POSITIONS")
+        if not self.risk_per_trade_pct <= self.max_total_risk_pct <= 20:
+            raise ConfigError("RISK_MAX_TOTAL_RISK_PCT doit être compris entre RISK_PER_TRADE_PCT et 20 (%)")
+        if not 0 < self.max_margin_usage_pct <= 90:
+            raise ConfigError("RISK_MAX_MARGIN_USAGE_PCT doit être compris entre 0 et 90 (%)")
         if self.sl_atr_multiplier <= 0 or self.tp_atr_multiplier <= 0:
             raise ConfigError("Les multiplicateurs ATR (SL/TP) doivent être > 0")
         if not 0 < self.min_lot <= self.max_lot:
@@ -256,7 +266,8 @@ class Settings:
             f"  Compte MT5      : {self.mt5.account} @ {self.mt5.server}",
             f"  Symboles        : {', '.join(self.trading.symbols)} ({self.trading.timeframe})",
             f"  Risque/trade    : {self.risk.risk_per_trade_pct}% | Perte max/jour : {self.risk.max_daily_loss_pct}%",
-            f"  Positions max   : {self.risk.max_open_positions} (par symbole : {self.risk.max_positions_per_symbol})",
+            f"  Positions max   : {self.risk.max_open_positions} (par symbole : {self.risk.max_positions_per_symbol})"
+            f" | risque cumulé max {self.risk.max_total_risk_pct}% | marge max {self.risk.max_margin_usage_pct}%",
             f"  Sentiment       : {self.sentiment.engine}",
             f"  Pondération     : technique {self.strategy.technical_weight} / sentiment {self.strategy.sentiment_weight}",
             f"  Sources news    : {len(self.news.rss_feeds)} RSS | NewsAPI {mask(self.news.newsapi_key)}"
@@ -292,6 +303,8 @@ def load_settings() -> Settings:
             max_consecutive_losses=get_int("RISK_MAX_CONSECUTIVE_LOSSES", 3),
             max_open_positions=get_int("RISK_MAX_OPEN_POSITIONS", 3),
             max_positions_per_symbol=get_int("RISK_MAX_POSITIONS_PER_SYMBOL", 1),
+            max_total_risk_pct=get_float("RISK_MAX_TOTAL_RISK_PCT", 3.0),
+            max_margin_usage_pct=get_float("RISK_MAX_MARGIN_USAGE_PCT", 50.0),
             max_spread_points=get_int("RISK_MAX_SPREAD_POINTS", 30),
             sl_atr_multiplier=get_float("RISK_SL_ATR_MULTIPLIER", 1.5),
             tp_atr_multiplier=get_float("RISK_TP_ATR_MULTIPLIER", 3.0),

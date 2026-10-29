@@ -209,6 +209,7 @@ export default function App() {
               <PriceChart
                 connection={connection}
                 symbols={status.data?.symbols ?? []}
+                positions={positions.data}
                 active={enabled && !onDataView && (isWide || tab === "positions")}
               />
             </div>

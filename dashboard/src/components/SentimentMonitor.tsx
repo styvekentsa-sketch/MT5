@@ -51,7 +51,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
         <button
           type="button"
           onClick={onRefresh}
-          className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs text-slate-400 hover:bg-line hover:text-white"
+          className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-2 text-xs text-slate-400 hover:bg-line hover:text-white pointer-fine:min-h-8"
           title="Rafraîchir"
         >
           <RefreshCw className="size-3.5" aria-hidden />

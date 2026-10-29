@@ -200,3 +200,12 @@ def test_every_decision_is_recorded(pipeline, isolated_database, monkeypatch):
 def test_database_failure_never_breaks_the_cycle(pipeline, isolated_database):
     isolated_database.close()
     assert [o.status for o in TradingEngine(symbols=["EURUSD"]).step()] == ["traded"]
+
+
+def test_one_symbol_in_cooldown_does_not_block_the_others(pipeline):
+    _, calls = pipeline
+    engine = TradingEngine(symbols=["EURUSD", "GBPUSD", "XAUUSD"], trade_cooldown_seconds=900)
+    assert _statuses(engine.step()) == ["traded", "traded", "traded"]
+    engine._last_trade_at.pop("GBPUSD")                            # GBPUSD libre, les deux autres en attente
+    assert _statuses(engine.step()) == ["cooldown", "traded", "cooldown"]
+    assert [c["symbol"] for c in calls] == ["EURUSD", "GBPUSD", "XAUUSD", "GBPUSD"]

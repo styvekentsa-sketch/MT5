@@ -12,9 +12,9 @@ const VARIANTS: Record<Variant, string> = {
   danger: "bg-rose-600 text-white hover:bg-rose-500 focus-visible:ring-rose-400",
 };
 
-// sm = 36 px à la souris, 44 px au doigt ; md = 44 px (minimum tactile) ; lg = 48 px (actions critiques)
+// sm = 44 px au doigt, 36 px seulement à la souris ; md = 44 px (minimum tactile) ; lg = 48 px (actions critiques)
 const SIZES: Record<Size, string> = {
-  sm: "h-9 gap-1.5 px-3 text-xs pointer-coarse:h-11",
+  sm: "h-11 gap-1.5 px-3 text-xs pointer-fine:h-9",
   md: "h-11 gap-2 px-4 text-sm",
   lg: "h-12 gap-2 px-5 text-sm",
 };

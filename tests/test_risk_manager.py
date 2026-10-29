@@ -171,3 +171,75 @@ def test_exceptions_are_turned_into_rejections(broker, monkeypatch):
     monkeypatch.setattr(rm, "get_account_info", boom)
     result = _validate()
     assert result["is_approved"] is False and "erreur interne" in result["reason"]
+
+
+# ----------------------------------------------------------------- multi-positions et risque global
+
+def _position(symbol="EURUSD", volume=0.5, entry=1.1000, sl=1.0985, side_type=0, ticket=1):
+    """Position MT5 (type 0 = BUY) avec son SL."""
+    return SimpleNamespace(ticket=ticket, symbol=symbol, type=side_type, volume=volume, price_open=entry, sl=sl)
+
+
+def test_pairs_are_independent(broker):
+    broker["positions"] = [_position("EURUSD")]                  # 75 USD de risque ouvert sur EURUSD
+    approved = _validate(symbol="GBPUSD")
+    assert approved["is_approved"] is True, approved["reason"]
+    assert approved["portfolio_risk_pct"] == pytest.approx(1.55)   # 0.75 % ouvert + 0.80 % nouveau
+    assert "déjà ouverte" in _validate(symbol="EURUSD")["reason"]   # limite par symbole inchangée
+
+
+def test_total_open_risk_is_capped(broker):
+    broker["positions"] = [_position("EURUSD", volume=0.84, ticket=1), _position("GBPUSD", volume=0.84, ticket=2)]
+    result = _validate(symbol="XAUUSD")                            # 2 x 1.26 % + 0.80 % = 3.32 % > 3 %
+    assert result["is_approved"] is False and "risque cumulé" in result["reason"]
+
+
+def test_locked_profit_position_adds_no_risk(broker):
+    broker["positions"] = [_position("EURUSD", volume=5.0, entry=1.1000, sl=1.1020)]   # SL au-dessus de l'entrée
+    assert _validate(symbol="GBPUSD")["portfolio_risk_pct"] == pytest.approx(0.8)
+
+
+def test_position_without_stop_loss_blocks_new_trades(broker):
+    broker["positions"] = [_position("EURUSD", sl=0.0)]
+    assert "non borné" in _validate(symbol="GBPUSD")["reason"]
+
+
+def test_global_margin_usage_is_capped(broker, account):
+    broker["account"] = replace(account, margin=4_850.0, margin_free=5_150.0)      # + 100 de marge = 49.5 %
+    assert _validate(symbol="GBPUSD")["is_approved"] is True
+    broker["account"] = replace(account, margin=5_000.0, margin_free=5_000.0)      # 51 % > 50 %
+    assert "marge totale" in _validate(symbol="GBPUSD")["reason"]
+
+
+def test_raised_limits_allow_more_simultaneous_trades(broker, monkeypatch):
+    wide = replace(settings, risk=replace(settings.risk, max_open_positions=5, max_positions_per_symbol=2,
+                                          max_total_risk_pct=5.0))
+    monkeypatch.setattr(rm, "settings", wide)
+    broker["positions"] = [_position("EURUSD", ticket=1), _position("GBPUSD", ticket=2), _position("XAUUSD", ticket=3)]
+    assert _validate(symbol="EURUSD")["is_approved"] is True                       # 2e position EURUSD permise
+    broker["positions"].append(_position("EURUSD", ticket=4))
+    assert "déjà ouverte" in _validate(symbol="EURUSD")["reason"]                  # 3e refusée (max 2)
+
+
+def test_simulated_broker_positions_are_supported():
+    from backtesting.broker import SimulatedBroker
+    from backtesting.data import default_specs
+    from datetime import datetime, timezone
+
+    sim = SimulatedBroker(default_specs("EURUSD"), 10_000)
+    sim.set_market(datetime(2025, 1, 2, tzinfo=timezone.utc), 1.1000, 0)
+    sim.open_position("SELL", 1.0, sl=1.1010, tp=None)
+    assert rm.open_positions_risk(sim) == (pytest.approx(100.0), [])
+
+
+@pytest.mark.parametrize("overrides", [
+    {"max_positions_per_symbol": 4, "max_open_positions": 3},
+    {"max_open_positions": 25},
+    {"max_total_risk_pct": 0.5},                                   # < risque par trade (1 %)
+    {"max_margin_usage_pct": 95.0},
+])
+def test_invalid_portfolio_limits(overrides):
+    from config import ConfigError
+
+    with pytest.raises(ConfigError):
+        replace(settings.risk, **overrides).validate()

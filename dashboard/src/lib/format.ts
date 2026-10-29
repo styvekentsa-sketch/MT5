@@ -74,3 +74,8 @@ export function formatDayIfNotToday(iso: string | null): string {
   if (Number.isNaN(date.getTime()) || date.toDateString() === new Date().toDateString()) return "";
   return date.toLocaleDateString(LOCALE, { day: "numeric", month: "short" });
 }
+
+/** Prix avec un nombre fixe de décimales (1,13220 et non 1,1322) : pas de saut de largeur à chaque tick. */
+export function formatPrice(value: number, digits: number): string {
+  return new Intl.NumberFormat(LOCALE, { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
+}
