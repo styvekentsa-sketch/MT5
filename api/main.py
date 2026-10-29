@@ -94,11 +94,11 @@ class _BackgroundServer(uvicorn.Server):
 
 
 class ApiServer:
-    """Serveur API exécuté dans un thread démon."""
+    """Serveur API exécuté dans un thread démon (API du bot, ou passerelle multi-comptes via `app`)."""
 
-    def __init__(self, engine: TradingEngine) -> None:
+    def __init__(self, engine: TradingEngine | None = None, app: FastAPI | None = None) -> None:
         config = uvicorn.Config(
-            create_app(engine),
+            app if app is not None else create_app(engine),
             host=settings.api.host,
             port=settings.api.port,
             log_config=None,             # les logs uvicorn passent par utils.logger

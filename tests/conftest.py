@@ -29,6 +29,7 @@ os.environ.update({
     "TRADING_SYMBOLS": "EURUSD,XAUUSD",
     "TRADING_TIMEFRAME": "M15",
     "NEWS_RSS_FEEDS": "",
+    "NEWS_DEFAULT_FEEDS": "false",                     # aucun accès réseau pendant les tests
     "SENTIMENT_ENGINE": "vader",
     "API_ENABLED": "false",
     "API_KEY": TEST_API_KEY,

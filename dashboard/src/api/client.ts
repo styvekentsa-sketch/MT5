@@ -1,5 +1,6 @@
 import type {
   Account,
+  AccountsList,
   Candles,
   ClosedPosition,
   ControlResult,
@@ -135,7 +136,17 @@ async function request<T>(conn: Connection, path: string, options: RequestOption
   return (await response.json()) as T;
 }
 
+/**
+ * Connexion vers un compte précis via la passerelle multi-comptes : toutes les routes
+ * habituelles (/api/status, /api/positions...) deviennent /api/accounts/{id}/api/...
+ */
+export function scopedConnection(connection: Connection, accountId: string): Connection {
+  return { ...connection, baseUrl: `${connection.baseUrl}/api/accounts/${encodeURIComponent(accountId)}` };
+}
+
 export const api = {
+  /** Passerelle multi-comptes uniquement (404 en mode compte unique) */
+  accounts: (c: Connection, signal?: AbortSignal) => request<AccountsList>(c, "/api/accounts", { signal }),
   status: (c: Connection, signal?: AbortSignal) => request<Status>(c, "/api/status", { signal }),
   account: (c: Connection, signal?: AbortSignal) => request<Account>(c, "/api/account", { signal }),
   positions: (c: Connection, signal?: AbortSignal) => request<Position[]>(c, "/api/positions", { signal }),

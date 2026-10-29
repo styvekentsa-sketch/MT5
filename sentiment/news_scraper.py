@@ -25,12 +25,15 @@ Usage :
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import feedparser
 import requests
@@ -90,9 +93,28 @@ SYMBOL_CURRENCY_HINTS: dict[str, tuple[str, ...]] = {
 
 MAJOR_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "CNY"}
 
+# -----------------------------------------------------------------------------
+#  Catalogue de flux d'actualités (vérifiés joignables ; complété par NEWS_RSS_FEEDS)
+#  Reuters ne publie plus de flux RSS public depuis 2020 : ses titres passent par
+#  Google News, qui attribue chaque article à son éditeur d'origine.
+# -----------------------------------------------------------------------------
+GOOGLE_NEWS_SEARCH = "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
+YAHOO_SYMBOL_FEED = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+YAHOO_TICKERS = {"XAU": "GC=F", "XAG": "SI=F", "WTI": "CL=F", "USOIL": "CL=F", "BRENT": "BZ=F", "UKOIL": "BZ=F"}
+
+FEED_WORKERS = 8                     # flux lus en parallèle
+FEED_DEADLINE_FACTOR = 3             # délai global de collecte = 3 x NEWS_REQUEST_TIMEOUT_SECONDS
+FEED_FAILURE_THRESHOLD = 3           # échecs consécutifs avant mise en pause d'un flux
+FEED_PAUSE_BASE_SECONDS = 300        # pause : 5 min, doublée à chaque échec supplémentaire...
+FEED_PAUSE_MAX_SECONDS = 3600        # ... dans la limite d'une heure
+FUTURE_TOLERANCE = timedelta(minutes=10)   # date de publication dans le futur : horloge du flux erronée
+
 # Fenêtre de blocage autour d'une annonce à fort impact (partagée par le moteur et le dashboard)
 NEWS_BLOCK_MINUTES_BEFORE = 15
 NEWS_BLOCK_MINUTES_AFTER = 5
+
+
+
 
 _calendar_lock = threading.Lock()
 _calendar_cache: list[EconomicEvent] | None = None
@@ -121,12 +143,20 @@ class EconomicEvent:
 
 
 @dataclass(frozen=True)
+class FeedSpec:
+    name: str
+    url: str
+    category: str                    # forex, macro, commodities, central_bank, symbol, custom
+
+
+@dataclass(frozen=True)
 class FeedStatus:
     url: str
     ok: bool
     last_fetch: datetime             # UTC
     article_count: int
     error: str = ""
+    consecutive_failures: int = 0
 
 
 @dataclass(frozen=True)
@@ -135,10 +165,35 @@ class NewsArticle:
     source: str
     link: str
     published: datetime | None       # UTC, None si le flux ne fournit pas de date
-    snippet: str
+    snippet: str                     # contenu : résumé texte, sans HTML, tronqué
+    feed: str = ""                   # flux d'origine (ex : « Bloomberg Markets »)
+    category: str = ""               # catégorie du flux (forex, macro, central_bank...)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+DEFAULT_FEEDS: tuple[FeedSpec, ...] = (
+    FeedSpec("FXStreet", "https://www.fxstreet.com/rss/news", "forex"),
+    FeedSpec("investingLive (ex-ForexLive)", "https://investinglive.com/feed/news", "forex"),
+    FeedSpec("FXEmpire", "https://www.fxempire.com/api/v1/en/articles/rss/news", "forex"),
+    FeedSpec("Investing.com Forex", "https://www.investing.com/rss/news_1.rss", "forex"),
+    FeedSpec("Nasdaq Devises", "https://www.nasdaq.com/feed/rssoutbound?category=Currencies", "forex"),
+    FeedSpec("Google News Forex",
+             GOOGLE_NEWS_SEARCH + quote('(forex OR "EUR/USD" OR "GBP/USD" OR "gold price") when:1d'), "forex"),
+    FeedSpec("Reuters (via Google News)",
+             GOOGLE_NEWS_SEARCH + quote("site:reuters.com (forex OR dollar OR euro OR gold OR inflation) when:1d"), "macro"),
+    FeedSpec("Bloomberg Markets", "https://feeds.bloomberg.com/markets/news.rss", "macro"),
+    FeedSpec("Bloomberg Economics", "https://feeds.bloomberg.com/economics/news.rss", "macro"),
+    FeedSpec("WSJ Markets", "https://feeds.content.dowjones.io/public/rss/RSSMarketsMain", "macro"),
+    FeedSpec("MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories", "macro"),
+    FeedSpec("CNBC Economy", "https://www.cnbc.com/id/20910258/device/rss/rss.html", "macro"),
+    FeedSpec("Investing.com Économie", "https://www.investing.com/rss/news_14.rss", "macro"),
+    FeedSpec("Investing.com Matières premières", "https://www.investing.com/rss/news_11.rss", "commodities"),
+    FeedSpec("Réserve fédérale (Fed)", "https://www.federalreserve.gov/feeds/press_all.xml", "central_bank"),
+    FeedSpec("BCE", "https://www.ecb.europa.eu/rss/press.html", "central_bank"),
+    FeedSpec("Banque d'Angleterre", "https://www.bankofengland.co.uk/rss/news", "central_bank"),
+)
 
 
 # =============================================================================
@@ -257,61 +312,137 @@ def _entry_datetime(entry: Any) -> datetime | None:
     return None
 
 
-def _entry_source(entry: Any, feed: Any, url: str) -> str:
-    """Nom de la source : éditeur d'origine (Google News), titre du flux, ou domaine."""
+def _domain(url: str) -> str:
+    return urlparse(url).netloc.removeprefix("www.") or url
+
+
+def _entry_source(entry: Any, feed: Any, url: str, name: str = "") -> str:
+    """Éditeur : celui de l'article (agrégateurs type Google News), sinon nom du flux, titre du flux, domaine."""
     source = entry.get("source")
     if isinstance(source, dict) and source.get("title"):
         return str(source["title"]).strip()
+    if name:
+        return name
     if feed.get("title"):
         return str(feed["title"]).strip()
-    return urlparse(url).netloc.removeprefix("www.")
+    return _domain(url)
+
+
+def _clean_title(title: str, source: str) -> str:
+    """Retire le suffixe « - Éditeur » ajouté par les agrégateurs (« Dollar rises - Reuters »)."""
+    suffix = f" - {source}"
+    return title[: -len(suffix)].rstrip() if source and title.endswith(suffix) else title
+
+
+def title_key(title: str) -> str:
+    """Clé de dédoublonnage : minuscules, ponctuation et espaces normalisés."""
+    return " ".join(re.sub(r"[^\w]+", " ", title.casefold()).split())
 
 
 def _record_feed(url: str, ok: bool, count: int = 0, error: str = "") -> None:
     with _feed_lock:
-        _feed_status[url] = FeedStatus(url, ok, datetime.now(timezone.utc), count, error)
+        previous = _feed_status.get(url)
+        failures = 0 if ok else (previous.consecutive_failures + 1 if previous else 1)
+        _feed_status[url] = FeedStatus(url, ok, datetime.now(timezone.utc), count, error, failures)
 
 
-def _fetch_feed(url: str) -> list[NewsArticle]:
-    """Télécharge et parse un flux RSS/Atom ; liste vide en cas d'échec. Le résultat est tracé par flux."""
+def _paused(url: str) -> bool:
+    """Flux en échec répété : mis en pause (5 min, puis 10, 20... jusqu'à 1 h) pour ne pas ralentir la collecte."""
+    with _feed_lock:
+        status = _feed_status.get(url)
+    if status is None or status.ok or status.consecutive_failures < FEED_FAILURE_THRESHOLD:
+        return False
+    pause = min(FEED_PAUSE_BASE_SECONDS * 2 ** (status.consecutive_failures - FEED_FAILURE_THRESHOLD),
+                FEED_PAUSE_MAX_SECONDS)
+    return datetime.now(timezone.utc) - status.last_fetch < timedelta(seconds=pause)
+
+
+def _fetch_feed(url: str, name: str = "", category: str = "") -> list[NewsArticle]:
+    """
+    Télécharge un flux RSS/Atom et normalise ses articles (titre, contenu, source, lien,
+    date UTC). Ne lève jamais d'exception : liste vide en cas d'échec, tracé par flux.
+    """
     try:
         response = _http_get(url)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Flux RSS inaccessible (%s) : %s", url, exc)
+        parsed = feedparser.parse(response.content)
+    except Exception as exc:  # noqa: BLE001 - une source en panne ne bloque pas les autres
+        log.warning("Flux RSS inaccessible (%s) : %s", name or url, exc)
         _record_feed(url, ok=False, error=str(exc))
         return []
 
-    parsed = feedparser.parse(response.content)
     if parsed.bozo and not parsed.entries:
-        log.warning("Flux RSS illisible (%s) : %s", url, parsed.get("bozo_exception"))
+        log.warning("Flux RSS illisible (%s) : %s", name or url, parsed.get("bozo_exception"))
         _record_feed(url, ok=False, error=f"flux illisible : {parsed.get('bozo_exception')}")
         return []
 
+    now = datetime.now(timezone.utc)
     articles: list[NewsArticle] = []
     for entry in parsed.entries:
-        title = _clean_html(entry.get("title", ""))
-        link = str(entry.get("link", "")).strip()
-        if not title or not link:
-            continue
-        summary = entry.get("summary") or entry.get("description") or ""
-        articles.append(NewsArticle(
-            title=title,
-            source=_entry_source(entry, parsed.feed, url),
-            link=link,
-            published=_entry_datetime(entry),
-            snippet=_truncate(_clean_html(summary)),
-        ))
-    log.debug("Flux %s : %d articles", url, len(articles))
+        try:
+            source = _entry_source(entry, parsed.feed, url, name)
+            title = _clean_title(_clean_html(entry.get("title", "")), source)
+            link = str(entry.get("link", "")).strip()
+            if not title or not link:
+                continue
+            published = _entry_datetime(entry)
+            if published is not None and published > now + FUTURE_TOLERANCE:
+                published = now                          # date future : horloge du flux erronée
+            summary = entry.get("summary") or entry.get("description") or ""
+            articles.append(NewsArticle(
+                title=title,
+                source=source,
+                link=link,
+                published=published,
+                snippet=_truncate(_clean_html(summary)),
+                feed=name or _domain(url),
+                category=category,
+            ))
+        except Exception as exc:  # noqa: BLE001 - un article malformé n'invalide pas tout le flux
+            log.debug("Article ignoré dans %s : %s", name or url, exc)
+    log.debug("Flux %s : %d articles", name or url, len(articles))
     _record_feed(url, ok=True, count=len(articles))
     return articles
 
 
+def _yahoo_ticker(symbol: str) -> str | None:
+    """Ticker Yahoo Finance d'un symbole broker (EURUSD -> EURUSD=X, XAUUSD -> GC=F)."""
+    sym = re.split(r"[^A-Z0-9]", symbol.upper(), maxsplit=1)[0]
+    for prefix, ticker in YAHOO_TICKERS.items():
+        if sym.startswith(prefix):
+            return ticker
+    if sym[:3] in MAJOR_CURRENCIES and sym[3:6] in MAJOR_CURRENCIES:
+        return f"{sym[:6]}=X"
+    return None
+
+
+def configured_feeds() -> list[FeedSpec]:
+    """
+    Flux lus par le bot : catalogue intégré (si NEWS_DEFAULT_FEEDS=true), un flux Yahoo
+    Finance par symbole tradé, puis les flux personnels de NEWS_RSS_FEEDS. Sans doublon d'URL.
+    """
+    specs: list[FeedSpec] = []
+    if settings.news.use_default_feeds:
+        specs.extend(DEFAULT_FEEDS)
+        for symbol in settings.trading.symbols:
+            ticker = _yahoo_ticker(symbol)
+            if ticker:
+                specs.append(FeedSpec(f"Yahoo Finance {symbol}",
+                                      YAHOO_SYMBOL_FEED.format(ticker=quote(ticker, safe="=")), "symbol"))
+    specs.extend(FeedSpec(_domain(url), url, "custom") for url in settings.news.rss_feeds)
+    seen: set[str] = set()
+    return [s for s in specs if not (s.url in seen or seen.add(s.url))]
+
+
 def get_feed_statuses(feeds: Iterable[str] | None = None) -> dict[str, FeedStatus | None]:
-    """Dernier résultat de téléchargement de chaque flux configuré (None = jamais téléchargé)."""
-    urls = list(feeds) if feeds is not None else list(settings.news.rss_feeds)
+    """Dernier résultat de téléchargement de chaque flux lu par le bot (None = jamais téléchargé)."""
+    urls = list(feeds) if feeds is not None else [s.url for s in configured_feeds()]
     with _feed_lock:
         return {url: _feed_status.get(url) for url in urls}
 
+
+def feed_names() -> dict[str, str]:
+    """URL -> nom lisible de chaque flux lu par le bot."""
+    return {s.url: s.name for s in configured_feeds()}
 
 # =============================================================================
 #  Calendrier économique
@@ -474,58 +605,102 @@ def is_high_impact_news_imminent(
 #  Actualités en temps réel
 # =============================================================================
 
+def _as_spec(feed: str | FeedSpec) -> FeedSpec:
+    return feed if isinstance(feed, FeedSpec) else FeedSpec(_domain(feed), feed, "custom")
+
+
 def get_latest_news(
-    feeds: Iterable[str] | None = None,
+    feeds: Iterable[str | FeedSpec] | None = None,
     lookback_hours: int | None = None,
     limit: int | None = None,
+    max_per_feed: int | None = None,
 ) -> list[NewsArticle]:
     """
-    Agrège les articles récents des flux RSS financiers.
+    Agrège les actualités récentes de plusieurs sources, de façon équilibrée.
+
+    - Les flux sont lus en parallèle, chacun isolé : une source injoignable, lente ou
+      malformée n'empêche jamais la lecture des autres (délai global de collecte borné).
+    - Un flux en échec répété est mis en pause quelques minutes (voir `_paused`).
+    - Équilibrage : au plus `max_per_feed` articles par flux (les plus récents), pour
+      qu'une source très prolifique ne domine pas l'analyse de sentiment.
+    - Dédoublonnage entre sources : même lien ou même titre normalisé.
 
     Args:
-        feeds: URLs des flux ; par défaut `settings.news.rss_feeds`.
-        lookback_hours: ancienneté maximale des articles ; par défaut
-            `settings.news.lookback_hours`. Les articles sans date sont conservés.
+        feeds: URLs ou FeedSpec ; par défaut `configured_feeds()`.
+        lookback_hours: ancienneté maximale (défaut NEWS_LOOKBACK_HOURS) ; articles sans date conservés.
         limit: nombre maximal d'articles retournés (les plus récents d'abord).
+        max_per_feed: plafond par flux (défaut NEWS_MAX_PER_FEED).
 
     Returns:
-        Articles dédoublonnés (lien et titre), triés du plus récent au plus ancien ;
-        liste vide si aucun flux n'est configuré ou accessible.
+        Articles normalisés, du plus récent au plus ancien ; liste vide si aucune source n'est disponible.
     """
     try:
-        feed_urls = list(feeds) if feeds is not None else list(settings.news.rss_feeds)
-        if not feed_urls:
-            log.warning("Aucun flux RSS configuré (NEWS_RSS_FEEDS)")
+        specs = [_as_spec(f) for f in feeds] if feeds is not None else configured_feeds()
+        if not specs:
+            log.warning("Aucun flux d'actualités configuré (NEWS_DEFAULT_FEEDS / NEWS_RSS_FEEDS)")
             return []
-
+        active = [s for s in specs if not _paused(s.url)]
         hours = lookback_hours if lookback_hours is not None else settings.news.lookback_hours
+        per_feed = max_per_feed or settings.news.max_per_feed
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        results = _collect(active)
 
+        oldest = datetime.min.replace(tzinfo=timezone.utc)
+        recency = lambda a: a.published or oldest   # noqa: E731
+        balanced: list[NewsArticle] = []
+        for spec in active:
+            recent = [a for a in results.get(spec.url, []) if a.published is None or a.published >= cutoff]
+            balanced.extend(sorted(recent, key=recency, reverse=True)[:per_feed])
+
+        # Dédoublonnage : on garde la PREMIÈRE publication (souvent la source qui a sorti l'information,
+        # les suivantes étant des reprises) ; les articles sans date passent après les articles datés.
+        latest = datetime.max.replace(tzinfo=timezone.utc)
         seen_links: set[str] = set()
         seen_titles: set[str] = set()
         articles: list[NewsArticle] = []
-        for url in feed_urls:
-            for article in _fetch_feed(url):
-                if article.published is not None and article.published < cutoff:
-                    continue
-                title_key = article.title.casefold()
-                if article.link in seen_links or title_key in seen_titles:
-                    continue
-                seen_links.add(article.link)
-                seen_titles.add(title_key)
-                articles.append(article)
-
-        oldest = datetime.min.replace(tzinfo=timezone.utc)
-        articles.sort(key=lambda a: a.published or oldest, reverse=True)
+        for article in sorted(balanced, key=lambda a: a.published or latest):
+            key = title_key(article.title)
+            if article.link in seen_links or key in seen_titles:
+                continue
+            seen_links.add(article.link)
+            seen_titles.add(key)
+            articles.append(article)
+        articles.sort(key=recency, reverse=True)
         if limit is not None:
             articles = articles[:limit]
 
-        log.info("%d articles récupérés depuis %d flux RSS (fenêtre %dh)", len(articles), len(feed_urls), hours)
+        sources_ok = sum(1 for s in active if results.get(s.url))
+        log.info("%d articles depuis %d/%d sources (fenêtre %dh, %d en pause)",
+                 len(articles), sources_ok, len(specs), hours, len(specs) - len(active))
         return articles
     except Exception:  # noqa: BLE001
         log.exception("Erreur inattendue lors de la récupération des actualités")
         return []
 
+
+def _collect(specs: list[FeedSpec]) -> dict[str, list[NewsArticle]]:
+    """Lit les flux en parallèle avec un délai global ; les flux trop lents sont abandonnés pour ce tour."""
+    if not specs:
+        return {}
+    results: dict[str, list[NewsArticle]] = {}
+    pool = ThreadPoolExecutor(max_workers=min(FEED_WORKERS, len(specs)), thread_name_prefix="news")
+    futures = {pool.submit(_fetch_feed, s.url, s.name, s.category): s for s in specs}
+    try:
+        for future in as_completed(futures, timeout=settings.news.request_timeout_seconds * FEED_DEADLINE_FACTOR):
+            spec = futures[future]
+            try:
+                results[spec.url] = future.result()
+            except Exception as exc:  # noqa: BLE001 - déjà isolé dans _fetch_feed : filet de sécurité
+                log.warning("Source %s ignorée : %s", spec.name, exc)
+                results[spec.url] = []
+    except FuturesTimeout:
+        for future, spec in futures.items():
+            if not future.done():
+                log.warning("Source %s trop lente : ignorée pour cette collecte", spec.name)
+                _record_feed(spec.url, ok=False, error="délai global de collecte dépassé")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return results
 
 if __name__ == "__main__":
     # `python -m sentiment.news_scraper` : test rapide des sources

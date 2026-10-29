@@ -15,17 +15,21 @@ export interface PollingState<T> {
  * - la requête suivante ne part qu'une fois la précédente terminée (pas de chevauchement)
  * - en cas d'erreur, la dernière donnée valide est conservée
  * - `refresh()` relance un appel immédiatement (ex : après une action)
+ * - `resetKey` : quand il change (ex : autre compte), les données précédentes sont effacées
+ *   immédiatement, pour ne jamais afficher les données d'un compte sous le nom d'un autre
  */
 export function usePolling<T>(
   fetcher: (signal: AbortSignal) => Promise<T>,
   intervalMs: number,
   enabled = true,
+  resetKey: unknown = null,
 ): PollingState<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [trigger, setTrigger] = useState(0);
   const fetcherRef = useRef(fetcher);
+  const resetKeyRef = useRef(resetKey);
 
   useEffect(() => {
     fetcherRef.current = fetcher;
@@ -34,6 +38,12 @@ export function usePolling<T>(
   const refresh = useCallback(() => setTrigger((n) => n + 1), []);
 
   useEffect(() => {
+    if (resetKeyRef.current !== resetKey) {
+      resetKeyRef.current = resetKey;
+      setData(null);
+      setError(null);
+      setLastUpdated(null);
+    }
     if (!enabled) return;
     const controller = new AbortController();
     let timer: number | undefined;
@@ -76,7 +86,7 @@ export function usePolling<T>(
       document.removeEventListener("visibilitychange", wake);
       window.removeEventListener("online", wake);
     };
-  }, [enabled, intervalMs, trigger]);
+  }, [enabled, intervalMs, trigger, resetKey]);
 
   return { data, error, lastUpdated, refresh };
 }

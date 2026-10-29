@@ -194,3 +194,29 @@ export interface Candles {
   ask: number | null;
   candles: Candle[];
 }
+
+// --- Multi-comptes (passerelle : GET /api/accounts) ---
+
+export interface AccountSummary {
+  id: string;
+  label: string;
+  login: number;
+  server: string;
+  /** False si le processus du compte ne répond pas */
+  reachable: boolean;
+  error: string;
+  state: EngineState | null;
+  mode: Mode | null;
+  mt5_connected: boolean | null;
+  currency: string | null;
+  balance: number | null;
+  equity: number | null;
+  daily_pl: number | null;
+  daily_pl_pct: number | null;
+  floating_pl: number | null;
+  open_positions: number | null;
+}
+
+export interface AccountsList {
+  accounts: AccountSummary[];
+}

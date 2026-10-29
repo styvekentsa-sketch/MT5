@@ -143,3 +143,9 @@ python -m backtesting.runner --symbol XAUUSD --mt5 --calendar annonces.csv --out
 Métriques : rendement total, drawdown maximal, taux de réussite, profit factor, gain/perte moyens, espérance par trade, et motifs de refus du risque. `--out` écrit `trades.csv`, `equity.csv` et `report.json`.
 
 Limites : un symbole par backtest ; sentiment neutre par défaut (`--sentiment database` rejoue les articles historisés) ; calendrier uniquement via `--calendar` ; profits calculés dans la devise de cotation (exact pour les paires en USD sur un compte USD) ; swaps et glissement hors gaps non simulés.
+
+## Multi-comptes
+
+Avec `MT5_ACCOUNTS=main,test` (voir `.env.example`), `python main.py` démarre un **superviseur** : un processus bot par compte, chacun relié à **son propre terminal MetaTrader 5** (une copie du dossier d'installation par compte), avec ses propres règles de risque (`ACCOUNT_<ID>_RISK_PER_TRADE_PCT`...), sa base SQLite (`data/trading_bot_<id>.db`) et ses logs (`logs/<id>/`). Un compte arrêté est redémarré automatiquement (5 s, 10 s... 2 min) avec une alerte.
+
+La passerelle (port `API_PORT`) expose `GET /api/accounts` (synthèse de tous les comptes) et relaie toutes les routes de chaque compte via `/api/accounts/{id}/api/...`. Le dashboard affiche alors une barre de comptes : le compte sélectionné pilote tout l'écran (positions, graphique, kill switch). Chaque alerte Telegram / Discord indique le compte concerné.

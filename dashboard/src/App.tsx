@@ -1,6 +1,7 @@
-import { useCallback, useState } from "react";
-import { api, errorMessage, type ApiError, type Connection } from "./api/client";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api, errorMessage, scopedConnection, type ApiError, type Connection } from "./api/client";
 import { AccountOverview } from "./components/AccountOverview";
+import { AccountsBar } from "./components/AccountsBar";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { ControlPanel } from "./components/ControlPanel";
 import { CycleOutcomes } from "./components/CycleOutcomes";
@@ -19,6 +20,8 @@ import { useToasts } from "./hooks/useToasts";
 const LIVE_POLL_MS = 2_500;
 // Les actualités sont rafraîchies côté bot toutes les NEWS_REFRESH_INTERVAL_SECONDS (300 s par défaut)
 const SENTIMENT_POLL_MS = 60_000;
+const ACCOUNTS_POLL_MS = 5_000;
+const SELECTED_ACCOUNT_KEY = "mt5bot.account";
 // Page « Données » : interrogée uniquement quand elle est affichée
 const DATA_FEEDS_POLL_MS = 30_000;
 const WEBHOOKS_POLL_MS = 5_000;
@@ -37,38 +40,86 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("account");
   const enabled = connection.apiKey !== "";
 
+  // Multi-comptes : la passerelle liste les comptes ; une API de compte unique répond 404 (pas de sélecteur)
+  const [accountsUnsupported, setAccountsUnsupported] = useState(false);
+  const accountsPoll = usePolling(
+    useCallback((s: AbortSignal) => api.accounts(connection, s), [connection]),
+    ACCOUNTS_POLL_MS,
+    enabled && !accountsUnsupported,
+    connection.baseUrl,
+  );
+  useEffect(() => {
+    if (accountsPoll.error?.status === 404) setAccountsUnsupported(true);
+  }, [accountsPoll.error]);
+  useEffect(() => setAccountsUnsupported(false), [connection]);
+  const accountList = accountsPoll.data?.accounts ?? [];
+  const multiAccount = accountList.length > 0;
+  const [selectedAccount, setSelectedAccount] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SELECTED_ACCOUNT_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  useEffect(() => {
+    if (multiAccount && !accountList.some((a) => a.id === selectedAccount)) setSelectedAccount(accountList[0].id);
+  }, [multiAccount, accountList, selectedAccount]);
+  const selectAccount = (id: string) => {
+    setSelectedAccount(id);
+    try {
+      localStorage.setItem(SELECTED_ACCOUNT_KEY, id);
+    } catch {
+      // mémorisation facultative
+    }
+  };
+  const activeAccount = accountList.find((a) => a.id === selectedAccount);
+  // Toutes les données et actions visent le compte sélectionné (ou l'API du compte unique)
+  // Dépend de l'identifiant (stable) et non de l'objet compte, renouvelé à chaque rafraîchissement :
+  // sinon le graphique rechargerait tout son historique toutes les 5 s.
+  const activeAccountId = multiAccount ? activeAccount?.id : undefined;
+  const scoped = useMemo(
+    () => (activeAccountId ? scopedConnection(connection, activeAccountId) : connection),
+    [activeAccountId, connection],
+  );
+
   const status = usePolling(
-    useCallback((s: AbortSignal) => api.status(connection, s), [connection]),
+    useCallback((s: AbortSignal) => api.status(scoped, s), [scoped]),
     LIVE_POLL_MS,
     enabled,
+    scoped.baseUrl,
   );
   const account = usePolling(
-    useCallback((s: AbortSignal) => api.account(connection, s), [connection]),
+    useCallback((s: AbortSignal) => api.account(scoped, s), [scoped]),
     LIVE_POLL_MS,
     enabled,
+    scoped.baseUrl,
   );
   const positions = usePolling(
-    useCallback((s: AbortSignal) => api.positions(connection, s), [connection]),
+    useCallback((s: AbortSignal) => api.positions(scoped, s), [scoped]),
     LIVE_POLL_MS,
     enabled,
+    scoped.baseUrl,
   );
   const sentiment = usePolling(
-    useCallback((s: AbortSignal) => api.sentiment(connection, s), [connection]),
+    useCallback((s: AbortSignal) => api.sentiment(scoped, s), [scoped]),
     SENTIMENT_POLL_MS,
     enabled,
+    scoped.baseUrl,
   );
   const onDataView = tab === "data";
   // À partir de la tablette (md), tous les panneaux de la vue sont affichés ensemble
   const isWide = useMediaQuery("(min-width: 768px)");
   const dataFeeds = usePolling(
-    useCallback((s: AbortSignal) => api.dataFeeds(connection, s), [connection]),
+    useCallback((s: AbortSignal) => api.dataFeeds(scoped, s), [scoped]),
     DATA_FEEDS_POLL_MS,
     enabled && onDataView,
+    scoped.baseUrl,
   );
   const webhookLog = usePolling(
-    useCallback((s: AbortSignal) => api.webhookEvents(connection, s), [connection]),
+    useCallback((s: AbortSignal) => api.webhookEvents(scoped, s), [scoped]),
     WEBHOOKS_POLL_MS,
     enabled && onDataView,
+    scoped.baseUrl,
   );
 
   const errors = [status.error, account.error, positions.error];
@@ -132,24 +183,25 @@ export default function App() {
         canInstall={installState.canInstall}
         onInstall={() => void handleInstall()}
         onOpenSettings={() => setSettingsOpen(true)}
+        accountLabel={multiAccount ? activeAccount?.label : undefined}
         onStart={() =>
           perform("Démarrage", async () => {
-            const result = await api.start(connection);
+            const result = await api.start(scoped);
             if (!result.success) throw new Error(result.message);
             return result.message;
           })
         }
         onStop={() =>
           perform("Pause", async () => {
-            const result = await api.stop(connection);
+            const result = await api.stop(scoped);
             if (!result.success) throw new Error(result.message);
             return result.message;
           })
         }
-        onSetMode={(live) => perform("Changement de mode", async () => (await api.setMode(connection, live)).message)}
+        onSetMode={(live) => perform("Changement de mode", async () => (await api.setMode(scoped, live)).message)}
         onKillSwitch={(includeManual) =>
           perform("Kill switch", async () => {
-            const result = await api.killSwitch(connection, includeManual);
+            const result = await api.killSwitch(scoped, includeManual);
             if (result.failed > 0) {
               throw new Error(`${result.failed} clôture(s) en échec, ${result.closed} réussie(s) : vérifiez le terminal MT5`);
             }
@@ -162,6 +214,8 @@ export default function App() {
 
       <main className="px-safe pb-mobile-nav mx-auto flex max-w-7xl flex-col gap-4 pt-4 md:pb-8 lg:gap-6 lg:pt-6 2xl:max-w-[100rem]">
         <ConnectionBanner online={online} baseUrl={connection.baseUrl} error={bannerError} status={status.data} />
+
+        {multiAccount && <AccountsBar accounts={accountList} selected={selectedAccount} onSelect={selectAccount} />}
 
         <nav className="hidden gap-1 self-start rounded-md border border-line bg-surface-2 p-1 md:flex" aria-label="Vues">
           {VIEW_TABS.map(({ label, tab: target }) => {
@@ -207,7 +261,7 @@ export default function App() {
         <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5">
             <div className={`md:col-span-2 xl:col-span-3 xl:col-start-1 xl:row-start-1 ${panel("positions")}`}>
               <PriceChart
-                connection={connection}
+                connection={scoped}
                 symbols={status.data?.symbols ?? []}
                 positions={positions.data}
                 active={enabled && !onDataView && (isWide || tab === "positions")}
@@ -220,7 +274,7 @@ export default function App() {
                 disabled={!apiConnected}
                 onClose={(ticket) =>
                   perform("Clôture", async () => {
-                    const result = await api.closePosition(connection, ticket);
+                    const result = await api.closePosition(scoped, ticket);
                     if (!result.success) throw new Error(result.message);
                     return `Position #${ticket} (${result.symbol}) fermée`;
                   })

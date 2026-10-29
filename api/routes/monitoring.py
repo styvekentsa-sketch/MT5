@@ -37,6 +37,7 @@ from sentiment.news_scraper import (
     EconomicEvent,
     NewsArticle,
     get_calendar_status,
+    feed_names,
     get_feed_statuses,
     get_upcoming_events,
     symbol_currencies,
@@ -218,8 +219,9 @@ def _sources(news_fetched_at: datetime | None) -> list[FeedSourceOut]:
     sources: list[FeedSourceOut] = []
     next_news = (news_fetched_at + timedelta(seconds=settings.news.refresh_interval_seconds)
                  if news_fetched_at else None)
+    names = feed_names()
     for url, feed in get_feed_statuses().items():
-        name = urlparse(url).netloc.removeprefix("www.") or url
+        name = names.get(url) or urlparse(url).netloc.removeprefix("www.") or url
         if feed is None:
             sources.append(FeedSourceOut(name=name, kind="rss", url=url, status="pending", last_fetch=None,
                                          next_fetch=next_news, items=0, detail="pas encore lu"))

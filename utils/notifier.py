@@ -65,7 +65,9 @@ class Notification:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def render(self) -> str:
-        header = f"{LEVEL_PREFIX[self.level]} [{APP_NAME}] {self.title}"
+        # Multi-comptes : le compte concerné figure dans chaque alerte (« [MT5 Bot · Principal] »)
+        name = f"{APP_NAME} · {settings.instance.label}" if settings.instance.label else APP_NAME
+        header = f"{LEVEL_PREFIX[self.level]} [{name}] {self.title}"
         stamp = self.created_at.strftime("%H:%M:%S UTC")
         return f"{header}\n{self.message}\n{stamp}" if self.message else f"{header}\n{stamp}"
 

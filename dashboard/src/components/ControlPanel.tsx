@@ -16,6 +16,8 @@ interface ControlPanelProps {
   onSetMode: (live: boolean) => Promise<void>;
   onKillSwitch: (includeManual: boolean) => Promise<void>;
   onOpenSettings: () => void;
+  /** Multi-comptes : compte visé par toutes les actions de ce panneau */
+  accountLabel?: string;
 }
 
 type BusyAction = "start" | "stop" | "mode" | "kill";
@@ -83,7 +85,9 @@ export function ControlPanel({
   onSetMode,
   onKillSwitch,
   onOpenSettings,
+  accountLabel,
 }: ControlPanelProps) {
+  const onAccount = accountLabel ? <> sur le compte <strong className="text-white">{accountLabel}</strong></> : null;
   const [busy, setBusy] = useState<BusyAction | null>(null);
   const [liveDialogOpen, setLiveDialogOpen] = useState(false);
   const [killDialogOpen, setKillDialogOpen] = useState(false);
@@ -126,6 +130,11 @@ export function ControlPanel({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <StatePill status={apiConnected ? status : null} />
+            {accountLabel && (
+              <span className="inline-flex items-center rounded border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-200">
+                Compte : {accountLabel}
+              </span>
+            )}
             <ModePill mode={apiConnected ? status?.mode : undefined} />
             {status && (
               <span className="hidden items-center gap-1.5 text-xs text-slate-400 sm:inline-flex">
@@ -219,7 +228,7 @@ export function ControlPanel({
           <>
             <p>
               Les prochains ordres du bot seront <strong className="text-white">envoyés au broker</strong> et
-              engageront de l'<strong className="text-rose-300">argent réel</strong>.
+              engageront de l'<strong className="text-rose-300">argent réel</strong>{onAccount}.
             </p>
             <p>Vérifiez la configuration du risque avant de continuer.</p>
           </>
@@ -242,7 +251,7 @@ export function ControlPanel({
         description={
           <p>
             Le moteur est mis en pause puis les positions sont <strong className="text-white">fermées au prix du
-            marché</strong>. La clôture est réelle, même en mode PAPER.
+            marché</strong>{onAccount}. La clôture est réelle, même en mode PAPER.
           </p>
         }
         onCancel={() => setKillDialogOpen(false)}

@@ -14,8 +14,11 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# `override=False` : une variable déjà définie dans le système a priorité sur le .env
-load_dotenv(BASE_DIR / ".env", override=False)
+# `override=False` : une variable déjà définie dans le système a priorité sur le .env.
+# Un processus de compte (multi-comptes) reçoit tout son environnement du superviseur et ne
+# relit PAS le .env : il n'a ainsi jamais accès aux identifiants des autres comptes.
+if os.environ.get("BOT_ROLE") != "worker":
+    load_dotenv(BASE_DIR / ".env", override=False)
 
 
 class ConfigError(ValueError):

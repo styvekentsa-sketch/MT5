@@ -31,12 +31,16 @@ class MT5Config:
             raise ConfigError(f"MT5_PATH introuvable : {self.path}")
 
 
-def load_mt5_credentials() -> MT5Config:
-    """Lit les identifiants MT5 depuis l'environnement (validation faite par `Settings`)."""
+def load_mt5_credentials(required: bool = True) -> MT5Config:
+    """
+    Lit les identifiants MT5 depuis l'environnement (validation faite par `Settings`).
+    `required=False` en mode multi-comptes : le superviseur ne se connecte à aucun terminal,
+    chaque compte a ses propres identifiants (ACCOUNT_<ID>_*).
+    """
     return MT5Config(
         account=get_int("MT5_ACCOUNT", 0),
-        password=get_str("MT5_PASSWORD", required=True),
-        server=get_str("MT5_SERVER", required=True),
+        password=get_str("MT5_PASSWORD", required=required),
+        server=get_str("MT5_SERVER", required=required),
         path=get_str("MT5_PATH") or None,
         timeout_ms=get_int("MT5_TIMEOUT_MS", 60_000),
     )

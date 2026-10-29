@@ -16,6 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from config.accounts import AccountSpec, load_accounts, validate_accounts
 from config.credentials import MT5Config, load_mt5_credentials
 from config.env import (
     BASE_DIR,
@@ -99,20 +100,25 @@ class NewsConfig:
     newsapi_key: str = field(repr=False)
     finnhub_api_key: str = field(repr=False)
     alphavantage_api_key: str = field(repr=False)
-    rss_feeds: tuple[str, ...]
+    rss_feeds: tuple[str, ...]       # flux personnels, ajoutés au catalogue intégré
     refresh_interval_seconds: int
     lookback_hours: int
     request_timeout_seconds: int
+    use_default_feeds: bool          # catalogue intégré (Bloomberg, Reuters, FXStreet, banques centrales...)
+    max_per_feed: int                # équilibrage : articles retenus au plus par flux
 
     @property
     def has_any_source(self) -> bool:
-        return bool(self.rss_feeds or self.newsapi_key or self.finnhub_api_key or self.alphavantage_api_key)
+        return bool(self.use_default_feeds or self.rss_feeds or self.newsapi_key or self.finnhub_api_key
+                    or self.alphavantage_api_key)
 
     def validate(self) -> None:
         if self.refresh_interval_seconds < 30:
             raise ConfigError("NEWS_REFRESH_INTERVAL_SECONDS doit être >= 30 (respect des quotas API)")
         if self.lookback_hours < 1:
             raise ConfigError("NEWS_LOOKBACK_HOURS doit être >= 1")
+        if not 1 <= self.max_per_feed <= 100:
+            raise ConfigError("NEWS_MAX_PER_FEED doit être compris entre 1 et 100")
 
 
 @dataclass(frozen=True)
@@ -233,6 +239,17 @@ class DatabaseConfig:
 
 
 @dataclass(frozen=True)
+class InstanceConfig:
+    """Identité du processus : compte unique, superviseur multi-comptes, ou compte géré par un superviseur."""
+    account_id: str                  # vide en mode compte unique
+    label: str
+
+    @property
+    def is_worker(self) -> bool:
+        return bool(self.account_id)
+
+
+@dataclass(frozen=True)
 class Settings:
     dry_run: bool                    # mode au démarrage : True = Paper, False = Live (modifiable via l'API)
     loop_interval_seconds: int
@@ -246,6 +263,8 @@ class Settings:
     api: ApiConfig
     notifier: NotifierConfig
     database: DatabaseConfig
+    instance: InstanceConfig
+    accounts: tuple[AccountSpec, ...] = ()     # non vide = superviseur multi-comptes
 
     @property
     def mode(self) -> str:
@@ -254,7 +273,10 @@ class Settings:
     def validate(self) -> None:
         if self.loop_interval_seconds < 1:
             raise ConfigError("BOT_LOOP_INTERVAL_SECONDS doit être >= 1")
-        for section in (self.mt5, self.trading, self.risk, self.news,
+        validate_accounts(self.accounts)
+        if not self.accounts:                  # le superviseur ne se connecte à aucun terminal
+            self.mt5.validate()
+        for section in (self.trading, self.risk, self.news,
                         self.sentiment, self.strategy, self.log, self.api, self.notifier,
                         self.database):
             section.validate()
@@ -270,7 +292,8 @@ class Settings:
             f" | risque cumulé max {self.risk.max_total_risk_pct}% | marge max {self.risk.max_margin_usage_pct}%",
             f"  Sentiment       : {self.sentiment.engine}",
             f"  Pondération     : technique {self.strategy.technical_weight} / sentiment {self.strategy.sentiment_weight}",
-            f"  Sources news    : {len(self.news.rss_feeds)} RSS | NewsAPI {mask(self.news.newsapi_key)}"
+            f"  Sources news    : {'catalogue intégré + ' if self.news.use_default_feeds else ''}"
+            f"{len(self.news.rss_feeds)} RSS perso | NewsAPI {mask(self.news.newsapi_key)}"
             f" | Finnhub {mask(self.news.finnhub_api_key)} | AlphaVantage {mask(self.news.alphavantage_api_key)}",
             f"  Notifications   : {', '.join(self.notifier.channels) or 'désactivées'}",
             f"  Historique      : {self.database.path} (conservé {self.database.retention_days} jours)",
@@ -286,10 +309,11 @@ def load_settings() -> Settings:
     if not db_path.is_absolute():
         db_path = BASE_DIR / db_path
 
+    accounts = load_accounts()
     cfg = Settings(
         dry_run=get_bool("DRY_RUN", True),
         loop_interval_seconds=get_int("BOT_LOOP_INTERVAL_SECONDS", 60),
-        mt5=load_mt5_credentials(),
+        mt5=load_mt5_credentials(required=not accounts),
         trading=TradingConfig(
             symbols=tuple(s.upper() for s in get_list("TRADING_SYMBOLS", "EURUSD")),
             timeframe=get_str("TRADING_TIMEFRAME", "M15").upper(),
@@ -319,6 +343,8 @@ def load_settings() -> Settings:
             refresh_interval_seconds=get_int("NEWS_REFRESH_INTERVAL_SECONDS", 300),
             lookback_hours=get_int("NEWS_LOOKBACK_HOURS", 6),
             request_timeout_seconds=get_int("NEWS_REQUEST_TIMEOUT_SECONDS", 10),
+            use_default_feeds=get_bool("NEWS_DEFAULT_FEEDS", True),
+            max_per_feed=get_int("NEWS_MAX_PER_FEED", 15),
         ),
         sentiment=SentimentConfig(
             engine=get_str("SENTIMENT_ENGINE", "vader").lower(),
@@ -351,6 +377,11 @@ def load_settings() -> Settings:
             cooldown_seconds=get_int("NOTIFY_COOLDOWN_SECONDS", 900),
             timeout_seconds=get_int("NOTIFY_TIMEOUT_SECONDS", 10),
         ),
+        instance=InstanceConfig(
+            account_id=get_str("BOT_ACCOUNT_ID"),
+            label=get_str("BOT_ACCOUNT_LABEL"),
+        ),
+        accounts=accounts,
         database=DatabaseConfig(
             path=db_path,
             retention_days=get_int("DB_RETENTION_DAYS", 90),

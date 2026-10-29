@@ -298,3 +298,30 @@ class CandlesOut(BaseModel):
     bid: float | None
     ask: float | None
     candles: list[CandleOut] = Field(description="Ordre chronologique ; la dernière bougie est en cours")
+
+
+# =============================================================================
+#  Multi-comptes (passerelle)
+# =============================================================================
+
+class AccountSummaryOut(BaseModel):
+    id: str
+    label: str
+    login: int
+    server: str
+    reachable: bool = Field(description="False si le processus du compte ne répond pas")
+    error: str = ""
+    state: Literal["running", "paused", "stopped"] | None = None
+    mode: Mode | None = None
+    mt5_connected: bool | None = None
+    currency: str | None = None
+    balance: float | None = None
+    equity: float | None = None
+    daily_pl: float | None = None
+    daily_pl_pct: float | None = None
+    floating_pl: float | None = None
+    open_positions: int | None = None
+
+
+class AccountsOut(BaseModel):
+    accounts: list[AccountSummaryOut]
