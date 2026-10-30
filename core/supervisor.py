@@ -73,7 +73,8 @@ class Supervisor:
         worker.process = self._popen([sys.executable, str(Path(BASE_DIR) / "main.py")], **kwargs)
         worker.started_at = self._clock()
         log.info("Compte %s (%d @ %s) démarré : PID %s, API interne %s",
-                 account.label, account.login, account.server, getattr(worker.process, "pid", "?"), account.api_url)
+                 account.label, account.login or account.broker, account.server, getattr(worker.process, "pid", "?"),
+                 account.api_url)
 
     def _close_console(self, worker: Worker) -> None:
         if worker.console is not None:
@@ -141,7 +142,9 @@ class Supervisor:
 
         self._install_signal_handlers()
         accounts = [w.account for w in self.workers]
-        log.info("Mode multi-comptes : %s", ", ".join(f"{a.label} ({a.login} @ {a.server})" for a in accounts))
+        log.info("Mode multi-comptes : %s", ", ".join(
+            f"{a.label} ({a.login} @ {a.server})" if a.broker == "mt5" else f"{a.label} ({a.server} via ccxt)"
+            for a in accounts))
         gateway = None
         if settings.api.enabled:
             gateway = ApiServer(app=create_gateway_app(tuple(accounts)))

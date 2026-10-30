@@ -8,9 +8,14 @@ interface AccountsBarProps {
   onSelect: (id: string) => void;
 }
 
+/** Plateforme du compte : terminal MT5 ou exchange crypto (via ccxt) */
+function platform(account: AccountSummary): string {
+  return !account.broker || account.broker === "mt5" ? "MT5" : account.broker;
+}
+
 function stateDot(account: AccountSummary): { className: string; label: string } {
   if (!account.reachable) return { className: "bg-rose-500", label: "Injoignable" };
-  if (!account.mt5_connected) return { className: "bg-amber-400", label: "MT5 déconnecté" };
+  if (!account.mt5_connected) return { className: "bg-amber-400", label: `${platform(account)} déconnecté` };
   if (account.state === "paused") return { className: "bg-amber-400", label: "En pause" };
   if (account.state === "running") return { className: "bg-emerald-400", label: "En marche" };
   return { className: "bg-slate-500", label: "Arrêté" };
@@ -27,7 +32,7 @@ export function AccountsBar({ accounts, selected, onSelect }: AccountsBarProps) 
         <Users className="size-4 text-slate-500" aria-hidden />
         Comptes ({accounts.length})
       </h2>
-      <div className="-mx-4 flex snap-x gap-3 overflow-x-auto px-4 pb-1 md:mx-0 md:grid md:grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] md:overflow-visible md:px-0" role="tablist">
+      <div className="-mx-4 flex snap-x scroll-px-4 gap-4 overflow-x-auto overscroll-x-contain px-4 pb-1 md:mx-0 md:grid md:scroll-px-0 md:grid-cols-[repeat(auto-fill,minmax(16rem,1fr))] md:overflow-visible md:px-0 lg:gap-6" role="tablist">
         {accounts.map((account) => {
           const active = account.id === selected;
           const dot = stateDot(account);
@@ -54,7 +59,7 @@ export function AccountsBar({ accounts, selected, onSelect }: AccountsBarProps) 
                 )}
               </div>
               <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
-                {account.login} · {account.server}
+                {platform(account) === "MT5" ? `${account.login} · ${account.server}` : `${platform(account)} · crypto`}
               </p>
               <div className="mt-2.5 flex items-baseline justify-between gap-2 font-mono tabular-nums">
                 <span className="text-base text-white">{money(account.balance)}</span>

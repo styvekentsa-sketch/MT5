@@ -1,11 +1,12 @@
-"""Dépendances partagées par les routes : accès au moteur et construction du statut."""
+"""Dépendances partagées par les routes : accès au moteur, au broker et construction du statut."""
 
 from __future__ import annotations
 
 from fastapi import HTTPException, Request, status
 
 from api.schemas import OutcomeOut, StatusOut
-from brokers.mt5_client import is_connected, is_dry_run
+from brokers.base import BaseBroker, is_dry_run
+from brokers.factory import get_broker
 from config.settings import settings
 from core.engine import TradingEngine
 from utils.logger import get_logger
@@ -21,12 +22,19 @@ def get_engine(request: Request) -> TradingEngine:
     return engine
 
 
+def get_active_broker(request: Request) -> BaseBroker:
+    """Broker du moteur attaché à l'API (sinon celui du processus, cf. BROKER_TYPE)."""
+    engine = getattr(request.app.state, "engine", None)
+    return engine.broker if engine is not None else get_broker()
+
+
 def build_status(engine: TradingEngine) -> StatusOut:
-    """Instantané de l'état du moteur et de la connexion MT5."""
+    """Instantané de l'état du moteur et de la connexion au broker."""
+    broker = engine.broker
     try:
-        connected = is_connected()
+        connected = broker.is_connected()
     except Exception as exc:  # noqa: BLE001 - le statut doit toujours répondre
-        log.warning("État de la connexion MT5 indisponible : %s", exc)
+        log.warning("État de la connexion %s indisponible : %s", broker.name, exc)
         connected = False
 
     if not engine.is_running:
@@ -40,6 +48,9 @@ def build_status(engine: TradingEngine) -> StatusOut:
         state=state,
         mode="PAPER" if is_dry_run() else "LIVE",
         mt5_connected=connected,
+        broker=broker.name,
+        broker_description=broker.description,
+        market=broker.market,
         symbols=list(engine.symbols),
         timeframe=settings.trading.timeframe,
         loop_interval_seconds=engine.interval_seconds,

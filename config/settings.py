@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config.accounts import AccountSpec, load_accounts, validate_accounts
+from config.broker import BrokerConfig, load_broker_config
 from config.credentials import MT5Config, load_mt5_credentials
 from config.env import (
     BASE_DIR,
@@ -32,6 +33,43 @@ from config.env import (
 VALID_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN1")
 VALID_SENTIMENT_ENGINES = ("vader", "keywords", "finbert", "llm")
 VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+# Profils de stratégie : valeurs par défaut des réglages concernés. Une variable renseignée
+# dans le .env reste prioritaire ; vide ou absente, la valeur du profil s'applique.
+#   standard : swing intraday (M15), signaux rares et confirmés, objectifs larges
+#   scalping : M1, indicateurs rapides, seuils bas, SL/TP serrés, boucle toutes les 10 s
+#   micro    : M1, aucun seuil (le moindre signal technique ouvre un trade), sentiment ignoré,
+#              SL et TP fixes de 5 pips
+STRATEGY_PROFILES: dict[str, dict[str, str]] = {
+    "standard": {
+        "TRADING_TIMEFRAME": "M15", "BOT_LOOP_INTERVAL_SECONDS": "60",
+        "STRATEGY_TECHNICAL_WEIGHT": "0.7", "STRATEGY_SENTIMENT_WEIGHT": "0.3",
+        "STRATEGY_SIGNAL_THRESHOLD": "0.6", "STRATEGY_TECHNICAL_THRESHOLD": "0.3",
+        "STRATEGY_MIN_SL_SPREADS": "0", "STRATEGY_STRUCTURAL_SL": "true",
+        "RISK_SL_ATR_MULTIPLIER": "1.5", "RISK_TP_ATR_MULTIPLIER": "3.0",
+        "STRATEGY_SL_PIPS": "0", "STRATEGY_TP_PIPS": "0",
+    },
+    "scalping": {
+        "TRADING_TIMEFRAME": "M1", "BOT_LOOP_INTERVAL_SECONDS": "10",
+        # le sentiment ne bloque plus un signal technique : il ne fait que le nuancer
+        "STRATEGY_TECHNICAL_WEIGHT": "0.85", "STRATEGY_SENTIMENT_WEIGHT": "0.15",
+        "STRATEGY_SIGNAL_THRESHOLD": "0.2", "STRATEGY_TECHNICAL_THRESHOLD": "0.2",
+        # SL au moins 3 spreads : en dessous, le coût d'entrée mange l'essentiel du gain visé
+        "STRATEGY_MIN_SL_SPREADS": "3", "STRATEGY_STRUCTURAL_SL": "false",
+        "RISK_SL_ATR_MULTIPLIER": "1.0", "RISK_TP_ATR_MULTIPLIER": "1.2",
+        "STRATEGY_SL_PIPS": "0", "STRATEGY_TP_PIPS": "0",
+    },
+    "micro": {
+        "TRADING_TIMEFRAME": "M1", "BOT_LOOP_INTERVAL_SECONDS": "10",
+        # seuils à 0 : tout score technique non nul donne un BUY / SELL ; le sentiment ne compte plus
+        "STRATEGY_TECHNICAL_WEIGHT": "1.0", "STRATEGY_SENTIMENT_WEIGHT": "0.0",
+        "STRATEGY_SIGNAL_THRESHOLD": "0", "STRATEGY_TECHNICAL_THRESHOLD": "0",
+        "STRATEGY_MIN_SL_SPREADS": "3", "STRATEGY_STRUCTURAL_SL": "false",
+        # SL / TP fixes en pips (prioritaires sur les multiplicateurs ATR, conservés pour référence)
+        "RISK_SL_ATR_MULTIPLIER": "1.0", "RISK_TP_ATR_MULTIPLIER": "1.0",
+        "STRATEGY_SL_PIPS": "5", "STRATEGY_TP_PIPS": "5",
+    },
+}
 
 
 # =============================================================================
@@ -69,8 +107,9 @@ class RiskConfig:
     max_spread_points: int
     sl_atr_multiplier: float
     tp_atr_multiplier: float
-    min_lot: float
+    min_lot: float                   # bornes en lots : Forex / CFD (MT5) uniquement
     max_lot: float
+    max_spread_pct: float = 0.15     # crypto : spread maximal en % du prix (les « points » n'y sont pas comparables)
 
     def validate(self) -> None:
         if not 0 < self.risk_per_trade_pct <= 5:
@@ -93,6 +132,8 @@ class RiskConfig:
             raise ConfigError("Les multiplicateurs ATR (SL/TP) doivent être > 0")
         if not 0 < self.min_lot <= self.max_lot:
             raise ConfigError("Contrainte non respectée : 0 < RISK_MIN_LOT <= RISK_MAX_LOT")
+        if not 0 < self.max_spread_pct <= 2:
+            raise ConfigError("RISK_MAX_SPREAD_PCT doit être compris entre 0 et 2 (%)")
 
 
 @dataclass(frozen=True)
@@ -141,12 +182,28 @@ class StrategyConfig:
     technical_weight: float
     sentiment_weight: float
     signal_threshold: float
+    profile: str = "standard"
+    technical_threshold: float = 0.3     # |score technique| minimal pour un signal BUY / SELL
+    min_sl_spreads: float = 0.0          # distance SL minimale, en multiples du spread (0 = aucune)
+    structural_sl: bool = True           # élargir le SL jusqu'au dernier plus bas / plus haut
+    sl_pips: float = 0.0                 # SL / TP fixes en pips (0 = distances ATR)
+    tp_pips: float = 0.0
 
     def validate(self) -> None:
+        if self.profile not in STRATEGY_PROFILES:
+            raise ConfigError(f"STRATEGY_PROFILE invalide : {self.profile} (attendu : {', '.join(STRATEGY_PROFILES)})")
+        if not 0 <= self.technical_threshold <= 1:
+            raise ConfigError("STRATEGY_TECHNICAL_THRESHOLD doit être compris entre 0 et 1")
+        if not 0 <= self.min_sl_spreads <= 20:
+            raise ConfigError("STRATEGY_MIN_SL_SPREADS doit être compris entre 0 et 20")
         if abs(self.technical_weight + self.sentiment_weight - 1.0) > 1e-6:
             raise ConfigError("STRATEGY_TECHNICAL_WEIGHT + STRATEGY_SENTIMENT_WEIGHT doit valoir 1.0")
-        if not 0 < self.signal_threshold <= 1:
+        if not 0 <= self.signal_threshold <= 1:
             raise ConfigError("STRATEGY_SIGNAL_THRESHOLD doit être compris entre 0 et 1")
+        if self.sl_pips < 0 or self.tp_pips < 0 or (self.sl_pips > 0) != (self.tp_pips > 0):
+            raise ConfigError("STRATEGY_SL_PIPS et STRATEGY_TP_PIPS : tous deux > 0, ou tous deux à 0 (distances ATR)")
+        if self.tp_pips < self.sl_pips:
+            raise ConfigError("STRATEGY_TP_PIPS doit être >= STRATEGY_SL_PIPS (le risk manager exige TP >= SL)")
 
 
 @dataclass(frozen=True)
@@ -254,6 +311,7 @@ class Settings:
     dry_run: bool                    # mode au démarrage : True = Paper, False = Live (modifiable via l'API)
     loop_interval_seconds: int
     mt5: MT5Config
+    broker: BrokerConfig
     trading: TradingConfig
     risk: RiskConfig
     news: NewsConfig
@@ -274,8 +332,10 @@ class Settings:
         if self.loop_interval_seconds < 1:
             raise ConfigError("BOT_LOOP_INTERVAL_SECONDS doit être >= 1")
         validate_accounts(self.accounts)
-        if not self.accounts:                  # le superviseur ne se connecte à aucun terminal
-            self.mt5.validate()
+        if not self.accounts:                  # le superviseur ne se connecte à aucun broker
+            self.broker.validate()
+            if self.broker.type == "mt5":
+                self.mt5.validate()
         for section in (self.trading, self.risk, self.news,
                         self.sentiment, self.strategy, self.log, self.api, self.notifier,
                         self.database):
@@ -285,12 +345,18 @@ class Settings:
         """Résumé lisible de la configuration, secrets masqués."""
         return "\n".join([
             f"  Mode            : {'PAPER / DRY RUN (aucun ordre réel)' if self.dry_run else 'LIVE'}",
-            f"  Compte MT5      : {self.mt5.account} @ {self.mt5.server}",
+            f"  Broker          : {self.broker.summary()}",
+            *([f"  Compte MT5      : {self.mt5.account} @ {self.mt5.server}"] if self.broker.type == "mt5" else []),
             f"  Symboles        : {', '.join(self.trading.symbols)} ({self.trading.timeframe})",
             f"  Risque/trade    : {self.risk.risk_per_trade_pct}% | Perte max/jour : {self.risk.max_daily_loss_pct}%",
             f"  Positions max   : {self.risk.max_open_positions} (par symbole : {self.risk.max_positions_per_symbol})"
             f" | risque cumulé max {self.risk.max_total_risk_pct}% | marge max {self.risk.max_margin_usage_pct}%",
             f"  Sentiment       : {self.sentiment.engine}",
+            f"  Stratégie       : profil {self.strategy.profile} | seuil hybride {self.strategy.signal_threshold}"
+            f" | seuil technique {self.strategy.technical_threshold} | "
+            + (f"SL {self.strategy.sl_pips:g} pips / TP {self.strategy.tp_pips:g} pips" if self.strategy.sl_pips
+               else f"SL {self.risk.sl_atr_multiplier} ATR / TP {self.risk.tp_atr_multiplier} ATR")
+            + f" | un tour toutes les {self.loop_interval_seconds} s",
             f"  Pondération     : technique {self.strategy.technical_weight} / sentiment {self.strategy.sentiment_weight}",
             f"  Sources news    : {'catalogue intégré + ' if self.news.use_default_feeds else ''}"
             f"{len(self.news.rss_feeds)} RSS perso | NewsAPI {mask(self.news.newsapi_key)}"
@@ -298,6 +364,16 @@ class Settings:
             f"  Notifications   : {', '.join(self.notifier.channels) or 'désactivées'}",
             f"  Historique      : {self.database.path} (conservé {self.database.retention_days} jours)",
         ])
+
+
+def _profile_name() -> str:
+    return (get_str("STRATEGY_PROFILE") or "standard").lower()
+
+
+def _profiled(name: str) -> str:
+    """Valeur du .env si elle est renseignée, sinon celle du profil de stratégie."""
+    defaults = STRATEGY_PROFILES.get(_profile_name(), STRATEGY_PROFILES["standard"])
+    return get_str(name) or defaults[name]
 
 
 def load_settings() -> Settings:
@@ -310,13 +386,15 @@ def load_settings() -> Settings:
         db_path = BASE_DIR / db_path
 
     accounts = load_accounts()
+    broker = load_broker_config()
     cfg = Settings(
         dry_run=get_bool("DRY_RUN", True),
-        loop_interval_seconds=get_int("BOT_LOOP_INTERVAL_SECONDS", 60),
-        mt5=load_mt5_credentials(required=not accounts),
+        loop_interval_seconds=int(_profiled("BOT_LOOP_INTERVAL_SECONDS")),
+        mt5=load_mt5_credentials(required=not accounts and broker.type == "mt5"),
+        broker=broker,
         trading=TradingConfig(
             symbols=tuple(s.upper() for s in get_list("TRADING_SYMBOLS", "EURUSD")),
-            timeframe=get_str("TRADING_TIMEFRAME", "M15").upper(),
+            timeframe=_profiled("TRADING_TIMEFRAME").upper(),
             bars_history=get_int("TRADING_BARS_HISTORY", 500),
             magic_number=get_int("TRADING_MAGIC_NUMBER", 20261026),
             deviation_points=get_int("TRADING_DEVIATION_POINTS", 20),
@@ -330,10 +408,11 @@ def load_settings() -> Settings:
             max_total_risk_pct=get_float("RISK_MAX_TOTAL_RISK_PCT", 3.0),
             max_margin_usage_pct=get_float("RISK_MAX_MARGIN_USAGE_PCT", 50.0),
             max_spread_points=get_int("RISK_MAX_SPREAD_POINTS", 30),
-            sl_atr_multiplier=get_float("RISK_SL_ATR_MULTIPLIER", 1.5),
-            tp_atr_multiplier=get_float("RISK_TP_ATR_MULTIPLIER", 3.0),
+            sl_atr_multiplier=float(_profiled("RISK_SL_ATR_MULTIPLIER").replace(",", ".")),
+            tp_atr_multiplier=float(_profiled("RISK_TP_ATR_MULTIPLIER").replace(",", ".")),
             min_lot=get_float("RISK_MIN_LOT", 0.01),
             max_lot=get_float("RISK_MAX_LOT", 1.0),
+            max_spread_pct=get_float("RISK_MAX_SPREAD_PCT", 0.15),
         ),
         news=NewsConfig(
             newsapi_key=get_str("NEWSAPI_KEY"),
@@ -352,9 +431,15 @@ def load_settings() -> Settings:
             anthropic_model=get_str("ANTHROPIC_MODEL", "claude-haiku-5-5"),
         ),
         strategy=StrategyConfig(
-            technical_weight=get_float("STRATEGY_TECHNICAL_WEIGHT", 0.7),
-            sentiment_weight=get_float("STRATEGY_SENTIMENT_WEIGHT", 0.3),
-            signal_threshold=get_float("STRATEGY_SIGNAL_THRESHOLD", 0.6),
+            technical_weight=float(_profiled("STRATEGY_TECHNICAL_WEIGHT").replace(",", ".")),
+            sentiment_weight=float(_profiled("STRATEGY_SENTIMENT_WEIGHT").replace(",", ".")),
+            signal_threshold=float(_profiled("STRATEGY_SIGNAL_THRESHOLD").replace(",", ".")),
+            profile=_profile_name(),
+            technical_threshold=float(_profiled("STRATEGY_TECHNICAL_THRESHOLD").replace(",", ".")),
+            min_sl_spreads=float(_profiled("STRATEGY_MIN_SL_SPREADS").replace(",", ".")),
+            structural_sl=_profiled("STRATEGY_STRUCTURAL_SL").lower() in ("1", "true", "yes", "on", "oui"),
+            sl_pips=float(_profiled("STRATEGY_SL_PIPS").replace(",", ".")),
+            tp_pips=float(_profiled("STRATEGY_TP_PIPS").replace(",", ".")),
         ),
         log=LogConfig(
             level=get_str("LOG_LEVEL", "INFO").upper(),

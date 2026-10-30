@@ -33,7 +33,7 @@ from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 500
 MEMORY = ":memory:"
@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS trade_decisions (
     volume          REAL,
     ticket          INTEGER,
     dry_run         INTEGER,
-    detail          TEXT    NOT NULL DEFAULT ''
+    detail          TEXT    NOT NULL DEFAULT '',
+    direction       TEXT,                      -- BUY / SELL envisagé, même si refusé
+    verdict         TEXT    NOT NULL DEFAULT '' -- motif principal, court et chiffré
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_time ON trade_decisions (decided_at);
 CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON trade_decisions (symbol, decided_at);
@@ -95,7 +97,10 @@ CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON trade_decisions (symbol, deci
 WEBHOOK_COLUMNS = ("received_at", "source", "symbol", "action", "accepted", "reason", "client", "size_bytes", "payload")
 ARTICLE_COLUMNS = ("link", "title", "source", "published_at", "snippet", "score", "label", "keywords", "symbols")
 DECISION_COLUMNS = ("decided_at", "cycle", "symbol", "status", "action", "confidence", "technical_score",
-                    "sentiment_score", "hybrid_score", "entry_price", "sl", "tp", "volume", "ticket", "dry_run", "detail")
+                    "sentiment_score", "hybrid_score", "entry_price", "sl", "tp", "volume", "ticket", "dry_run", "detail",
+                    "direction", "verdict")
+# Colonnes ajoutées après la première version : ajoutées aux bases existantes à l'ouverture
+MIGRATIONS = {"trade_decisions": (("direction", "TEXT"), ("verdict", "TEXT NOT NULL DEFAULT ''"))}
 PURGE_TABLES = {"webhooks_log": "received_at", "market_sentiment": "last_seen_at", "trade_decisions": "decided_at"}
 
 
@@ -157,6 +162,12 @@ class Database:
             if self.path != MEMORY:
                 conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+            for table, columns in MIGRATIONS.items():
+                existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for name, definition in columns:
+                    if name not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                        log.info("Base SQLite : colonne %s.%s ajoutée", table, name)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.commit()
             self._conn = conn
@@ -303,7 +314,7 @@ class Database:
                 value = _iso(value) or _now()
             elif column == "dry_run" and value is not None:
                 value = int(bool(value))
-            elif column == "detail":
+            elif column in ("detail", "verdict"):
                 value = str(value or "")
             values.append(value)
         cursor = self._write(f"INSERT INTO trade_decisions ({', '.join(DECISION_COLUMNS)}) "

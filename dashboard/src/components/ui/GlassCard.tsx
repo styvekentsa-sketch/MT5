@@ -8,19 +8,23 @@ interface GlassCardProps {
   children: ReactNode;
 }
 
-/** Panneau plat à bordure fine, avec bandeau de titre optionnel (style terminal). */
+/**
+ * Panneau plat à bordure fine, avec bandeau de titre optionnel (style terminal).
+ * Bandeau de hauteur fixe (h-12) : les en-têtes de cartes voisines restent alignés quel que
+ * soit leur contenu. Marges intérieures : 16 px sur mobile, 20 px à partir de `sm`.
+ */
 export function GlassCard({ title, icon, actions, className = "", children }: GlassCardProps) {
   return (
     <section
-      className={`rounded-md border border-line bg-surface ${className}`}
+      className={`min-w-0 overflow-hidden rounded-md border border-line bg-surface ${className}`}
     >
       {(title || actions) && (
-        <header className="flex min-h-11 items-center justify-between gap-3 border-b border-line bg-surface-2 px-5 py-2.5">
-          <h2 className="flex items-center gap-2 text-xs font-semibold tracking-[0.08em] text-slate-200 uppercase">
-            {icon && <span className="text-slate-500">{icon}</span>}
-            {title}
+        <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-line bg-surface-2 px-4 sm:px-5">
+          <h2 className="flex min-w-0 items-center gap-2 text-xs font-semibold tracking-[0.08em] text-slate-200 uppercase">
+            {icon && <span className="shrink-0 text-slate-500">{icon}</span>}
+            <span className="truncate">{title}</span>
           </h2>
-          {actions}
+          {actions && <div className="flex min-w-0 shrink-0 items-center justify-end">{actions}</div>}
         </header>
       )}
       {children}

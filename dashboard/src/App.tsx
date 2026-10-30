@@ -5,6 +5,7 @@ import { AccountsBar } from "./components/AccountsBar";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { ControlPanel } from "./components/ControlPanel";
 import { CycleOutcomes } from "./components/CycleOutcomes";
+import { DecisionJournal, type DecisionFilter } from "./components/DecisionJournal";
 import { DataFeedsPage } from "./components/data/DataFeedsPage";
 import { MobileNav, type Tab } from "./components/MobileNav";
 import { PriceChart } from "./components/Chart";
@@ -18,6 +19,8 @@ import { usePolling } from "./hooks/usePolling";
 import { useToasts } from "./hooks/useToasts";
 
 const LIVE_POLL_MS = 2_500;
+// Compte et positions : chaque seconde, pour suivre le P/L des micro-trades au centime près
+const PNL_POLL_MS = 1_000;
 // Les actualités sont rafraîchies côté bot toutes les NEWS_REFRESH_INTERVAL_SECONDS (300 s par défaut)
 const SENTIMENT_POLL_MS = 60_000;
 const ACCOUNTS_POLL_MS = 5_000;
@@ -25,6 +28,9 @@ const SELECTED_ACCOUNT_KEY = "mt5bot.account";
 // Page « Données » : interrogée uniquement quand elle est affichée
 const DATA_FEEDS_POLL_MS = 30_000;
 const WEBHOOKS_POLL_MS = 5_000;
+// Journal des décisions : suit le moteur tour par tour (interrogé seulement quand le panneau est affiché)
+const DECISIONS_POLL_MS = 5_000;
+const DECISIONS_LIMIT = 50;
 
 const VIEW_TABS = [
   { label: "Trading", tab: "account" },
@@ -90,13 +96,13 @@ export default function App() {
   );
   const account = usePolling(
     useCallback((s: AbortSignal) => api.account(scoped, s), [scoped]),
-    LIVE_POLL_MS,
+    PNL_POLL_MS,
     enabled,
     scoped.baseUrl,
   );
   const positions = usePolling(
     useCallback((s: AbortSignal) => api.positions(scoped, s), [scoped]),
-    LIVE_POLL_MS,
+    PNL_POLL_MS,
     enabled,
     scoped.baseUrl,
   );
@@ -109,6 +115,16 @@ export default function App() {
   const onDataView = tab === "data";
   // À partir de la tablette (md), tous les panneaux de la vue sont affichés ensemble
   const isWide = useMediaQuery("(min-width: 768px)");
+  const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
+  const decisions = usePolling(
+    useCallback(
+      (s: AbortSignal) => api.botDecisions(scoped, decisionFilter, DECISIONS_LIMIT, s),
+      [scoped, decisionFilter],
+    ),
+    DECISIONS_POLL_MS,
+    enabled && !onDataView && (isWide || tab === "engine"),
+    `${scoped.baseUrl}|${decisionFilter}`,
+  );
   const dataFeeds = usePolling(
     useCallback((s: AbortSignal) => api.dataFeeds(scoped, s), [scoped]),
     DATA_FEEDS_POLL_MS,
@@ -137,6 +153,12 @@ export default function App() {
     refreshAccount();
     refreshPositions();
   }, [refreshStatus, refreshAccount, refreshPositions]);
+
+  // Une position s'ouvre ou se ferme : solde et P/L du jour relus aussitôt (sans attendre le tour suivant)
+  const openTickets = positions.data?.map((p) => p.ticket).sort((x, y) => x - y).join(",");
+  useEffect(() => {
+    if (openTickets !== undefined) refreshAccount();
+  }, [openTickets, refreshAccount]);
 
   /** Exécute une action de contrôle : toast de succès ou d'erreur, puis rafraîchissement immédiat. */
   const perform = useCallback(
@@ -175,7 +197,7 @@ export default function App() {
   const { refresh: refreshWebhooks } = webhookLog;
 
   return (
-    <div className="min-h-dvh text-slate-100">
+    <div className="min-h-dvh w-full overflow-x-clip text-slate-100">
       <ControlPanel
         status={status.data}
         apiConnected={apiConnected}
@@ -212,7 +234,7 @@ export default function App() {
         }
       />
 
-      <main className="px-safe pb-mobile-nav mx-auto flex max-w-7xl flex-col gap-4 pt-4 md:pb-8 lg:gap-6 lg:pt-6 2xl:max-w-[100rem]">
+      <main className="px-safe pb-mobile-nav mx-auto flex w-full max-w-7xl min-w-0 flex-col gap-4 pt-4 md:pb-8 lg:gap-6 lg:pt-6 2xl:max-w-[100rem]">
         <ConnectionBanner online={online} baseUrl={connection.baseUrl} error={bannerError} status={status.data} />
 
         {multiAccount && <AccountsBar accounts={accountList} selected={selectedAccount} onSelect={selectAccount} />}
@@ -250,7 +272,7 @@ export default function App() {
         )}
 
         <div className={panel("account")}>
-          <AccountOverview account={account.data} />
+          <AccountOverview account={account.data} connected={apiConnected ? (status.data?.mt5_connected ?? null) : false} />
         </div>
 
         {/*
@@ -258,8 +280,8 @@ export default function App() {
           à gauche et actualités à droite. Bureau (xl) : graphique, positions et moteur sur 3/5,
           actualités sur 2/5 de toute la hauteur (disposition station de trading).
         */}
-        <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5">
-            <div className={`md:col-span-2 xl:col-span-3 xl:col-start-1 xl:row-start-1 ${panel("positions")}`}>
+        <div className={`grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5 ${onDataView ? "hidden" : ""}`}>
+            <div className={`min-w-0 md:col-span-2 xl:col-span-3 xl:col-start-1 xl:row-start-1 ${panel("positions")}`}>
               <PriceChart
                 connection={scoped}
                 symbols={status.data?.symbols ?? []}
@@ -267,10 +289,11 @@ export default function App() {
                 active={enabled && !onDataView && (isWide || tab === "positions")}
               />
             </div>
-            <div className={`md:col-start-1 md:row-start-2 xl:col-span-3 ${panel("positions")}`}>
+            <div className={`min-w-0 md:col-start-1 md:row-start-2 xl:col-span-3 ${panel("positions")}`}>
               <PositionsTable
                 positions={positions.data}
                 currency={account.data?.currency ?? "USD"}
+                balance={account.data?.balance ?? null}
                 disabled={!apiConnected}
                 onClose={(ticket) =>
                   perform("Clôture", async () => {
@@ -281,18 +304,26 @@ export default function App() {
                 }
               />
             </div>
-            <div className={`md:col-start-1 md:row-start-3 xl:col-span-3 ${panel("engine")}`}>
-              <CycleOutcomes status={status.data} />
+            <div className={`min-w-0 md:col-start-1 md:row-start-3 xl:col-span-3 ${panel("engine")}`}>
+              <div className="flex flex-col gap-4 lg:gap-6">
+                <CycleOutcomes status={status.data} />
+                <DecisionJournal
+                  journal={decisions.data}
+                  filter={decisionFilter}
+                  onFilterChange={setDecisionFilter}
+                  lastUpdated={decisions.lastUpdated}
+                />
+              </div>
             </div>
           <div
-            className={`md:col-start-2 md:row-span-2 md:row-start-2 xl:col-span-2 xl:col-start-4 xl:row-span-3 xl:row-start-1 ${panel("news")}`}
+            className={`min-w-0 md:col-start-2 md:row-span-2 md:row-start-2 xl:col-span-2 xl:col-start-4 xl:row-span-3 xl:row-start-1 ${panel("news")}`}
           >
             <SentimentMonitor sentiment={sentiment.data} lastUpdated={sentiment.lastUpdated} onRefresh={refreshSentiment} />
           </div>
         </div>
 
         <footer className="hidden text-xs text-slate-600 md:block">
-          API : <span className="font-mono">{connection.baseUrl}</span> · rafraîchissement {LIVE_POLL_MS / 1000} s
+          API : <span className="font-mono">{connection.baseUrl}</span> · rafraîchissement {PNL_POLL_MS / 1000} s (compte, positions) · {LIVE_POLL_MS / 1000} s (moteur)
         </footer>
       </main>
 

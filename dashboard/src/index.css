@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Tailwind ignore les chemins du .gitignore : la règle `data/` du dépôt (base SQLite du bot)
+   masquait aussi src/components/data/, dont les classes propres n'étaient jamais générées. */
+@source "./components/data";
+
 /* -------------------------------------------------------------------------
    Charte « terminal institutionnel » : fonds anthracite mats, texte blanc cassé,
    couleurs fonctionnelles désaturées. Les palettes Tailwind utilisées par les
@@ -157,4 +161,28 @@ label {
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line-strong) transparent;
+}
+
+/* P/L en direct : bref éclair à chaque variation (vert = hausse, rouge = baisse) */
+@keyframes pnl-up {
+  from {
+    background-color: color-mix(in srgb, var(--color-emerald-500) 35%, transparent);
+  }
+}
+@keyframes pnl-down {
+  from {
+    background-color: color-mix(in srgb, var(--color-rose-500) 35%, transparent);
+  }
+}
+@utility flash-up {
+  animation: pnl-up 0.8s ease-out;
+}
+@utility flash-down {
+  animation: pnl-down 0.8s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .flash-up,
+  .flash-down {
+    animation: none;
+  }
 }

@@ -8,6 +8,7 @@ import pytest
 from config import settings
 from strategies import strategy_manager as sm
 from strategies.technical_analysis import TechnicalSignal
+from tests.fakes import FakeBroker
 
 
 def _tech(signal="BUY", score=1.0, close=1.1, atr=0.001, swing_low=1.0, swing_high=1.2) -> TechnicalSignal:
@@ -54,12 +55,14 @@ def test_sl_tp_impossible_returns_none(action, entry, tech):
 def market(monkeypatch):
     """Dépendances de evaluate_market simulées ; modifier `state` pour chaque scénario."""
     state = {"tech": _tech(), "sentiment": 0.0, "news_blocked": False, "articles": ["article"]}
-    monkeypatch.setattr(sm, "get_historical_data", lambda symbol, count: pd.DataFrame({"close": [1.0]}))
+    fake = FakeBroker()
+    fake.bars = pd.DataFrame({"close": [1.0]})
+    monkeypatch.setattr(sm, "get_broker", lambda: fake)
     monkeypatch.setattr(sm, "technical_signal", lambda df: state["tech"])
     monkeypatch.setattr(sm, "is_high_impact_news_imminent", lambda symbol: state["news_blocked"])
     monkeypatch.setattr(sm, "get_recent_news", lambda: state["articles"])
     monkeypatch.setattr(sm, "analyze_news_items", lambda articles, symbol: state["sentiment"])
-    monkeypatch.setattr(sm, "get_current_tick", lambda symbol: None)
+    state["broker"] = fake
     return state
 
 
@@ -102,7 +105,7 @@ def test_market_data_failure_holds(market, monkeypatch):
     def boom(symbol, count):
         raise ConnectionError("MT5 indisponible")
 
-    monkeypatch.setattr(sm, "get_historical_data", boom)
+    monkeypatch.setattr(market["broker"], "get_historical_data", boom)
     decision = sm.evaluate_market("EURUSD")
     assert decision["action"] == "HOLD" and "indisponibles" in decision["reason"]
 

@@ -64,7 +64,8 @@ def _get_json(account: AccountSpec, path: str) -> Any:
 
 def account_summary(account: AccountSpec) -> AccountSummaryOut:
     """Synthèse d'un compte ; `reachable=False` (sans exception) si son processus ne répond pas."""
-    base = {"id": account.id, "label": account.label, "login": account.login, "server": account.server}
+    base = {"id": account.id, "label": account.label, "login": account.login, "server": account.server,
+            "broker": account.server if account.broker == "ccxt" else "mt5"}
     try:
         status_body = _get_json(account, "/api/status")
     except (requests.RequestException, ValueError) as exc:
@@ -78,7 +79,7 @@ def account_summary(account: AccountSpec) -> AccountSummaryOut:
         summary.update({key: account_body.get(key) for key in
                         ("currency", "balance", "equity", "daily_pl", "daily_pl_pct", "floating_pl")})
     except (requests.RequestException, ValueError) as exc:        # MT5 indisponible : synthèse partielle
-        summary["error"] = f"compte MT5 indisponible ({_reason(exc) if isinstance(exc, requests.RequestException) else 'réponse invalide'})"
+        summary["error"] = f"compte indisponible ({_reason(exc) if isinstance(exc, requests.RequestException) else 'réponse invalide'})"
     try:
         positions = _get_json(account, "/api/positions?bot_only=false")
         summary["open_positions"] = len(positions)
@@ -91,7 +92,7 @@ def create_gateway_app(accounts: tuple[AccountSpec, ...]) -> FastAPI:
     """Application FastAPI de la passerelle pour les comptes donnés."""
     by_id = {a.id: a for a in accounts}
     app = FastAPI(
-        title="MT5 Trading Bot — passerelle multi-comptes",
+        title="Trading Bot — passerelle multi-comptes",
         version="1.0.0",
         description=("Synthèse de tous les comptes et accès aux routes de chaque compte via "
                      "`/api/accounts/{id}/api/...`. En-tête `X-API-Key` requis (bouton **Authorize**)."),

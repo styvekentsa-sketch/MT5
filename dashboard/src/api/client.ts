@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountsList,
+  BotDecisions,
   Candles,
   ClosedPosition,
   ControlResult,
@@ -161,6 +162,13 @@ export const api = {
       timeoutMs: SENTIMENT_TIMEOUT_MS,
     }),
   webhookEvents: (c: Connection, signal?: AbortSignal) => request<WebhookLog>(c, "/api/webhooks/events", { signal }),
+  /** Journal des décisions et rejets du moteur (les plus récentes d'abord) */
+  botDecisions: (c: Connection, filter: "all" | "accepted" | "rejected", limit: number, signal?: AbortSignal) =>
+    request<BotDecisions>(
+      c,
+      `/api/bot/decisions?limit=${limit}${filter === "all" ? "" : `&status=${filter}`}`,
+      { signal },
+    ),
   candles: (c: Connection, symbol: string, timeframe: string, count: number, signal?: AbortSignal) =>
     request<Candles>(
       c,

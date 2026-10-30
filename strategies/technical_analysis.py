@@ -28,6 +28,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import MACD, EMAIndicator
 from ta.volatility import AverageTrueRange
 
+from config.settings import settings
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -59,6 +60,33 @@ RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
 
 REQUIRED_COLUMNS = ("open", "high", "low", "close")
+
+
+@dataclass(frozen=True)
+class IndicatorParams:
+    """Périodes des indicateurs ; le profil « scalping » réagit en quelques bougies M1."""
+    ema_fast: int
+    ema_slow: int
+    rsi_window: int
+    macd_fast: int
+    macd_slow: int
+    macd_signal: int
+    atr_window: int
+    swing_lookback: int
+
+
+INDICATOR_PROFILES = {
+    "standard": IndicatorParams(EMA_FAST, EMA_SLOW, RSI_WINDOW, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+                                ATR_WINDOW, SWING_LOOKBACK),
+    "scalping": IndicatorParams(ema_fast=5, ema_slow=13, rsi_window=7, macd_fast=5, macd_slow=13, macd_signal=4,
+                                atr_window=7, swing_lookback=10),
+}
+INDICATOR_PROFILES["micro"] = INDICATOR_PROFILES["scalping"]       # mêmes indicateurs rapides, sans seuil
+
+
+def active_params() -> IndicatorParams:
+    """Paramètres du profil configuré (STRATEGY_PROFILE)."""
+    return INDICATOR_PROFILES.get(settings.strategy.profile, INDICATOR_PROFILES["standard"])
 
 
 # =============================================================================
@@ -108,25 +136,27 @@ def _closed_candles(df: pd.DataFrame | None) -> pd.DataFrame | None:
     return clean.iloc[:-1]
 
 
-def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def compute_indicators(df: pd.DataFrame, params: IndicatorParams | None = None) -> pd.DataFrame:
     """
     Ajoute au DataFrame (copie) les colonnes : ema_fast, ema_slow, rsi, macd,
     macd_signal, macd_hist, atr. Les premières lignes valent NaN (période de chauffe).
+    Périodes : `params`, sinon celles du profil configuré.
     """
+    p = params or active_params()
     out = df.copy()
     close, high, low = out["close"], out["high"], out["low"]
 
-    out["ema_fast"] = EMAIndicator(close, window=EMA_FAST).ema_indicator()
-    out["ema_slow"] = EMAIndicator(close, window=EMA_SLOW).ema_indicator()
-    out["rsi"] = RSIIndicator(close, window=RSI_WINDOW).rsi()
+    out["ema_fast"] = EMAIndicator(close, window=p.ema_fast).ema_indicator()
+    out["ema_slow"] = EMAIndicator(close, window=p.ema_slow).ema_indicator()
+    out["rsi"] = RSIIndicator(close, window=p.rsi_window).rsi()
 
-    macd = MACD(close, window_slow=MACD_SLOW, window_fast=MACD_FAST, window_sign=MACD_SIGNAL)
+    macd = MACD(close, window_slow=p.macd_slow, window_fast=p.macd_fast, window_sign=p.macd_signal)
     out["macd"] = macd.macd()
     out["macd_signal"] = macd.macd_signal()
     out["macd_hist"] = macd.macd_diff()
 
     # `ta` remplit la période de chauffe de l'ATR avec des 0 : on les remplace par NaN
-    atr = AverageTrueRange(high, low, close, window=ATR_WINDOW).average_true_range()
+    atr = AverageTrueRange(high, low, close, window=p.atr_window).average_true_range()
     out["atr"] = atr.replace(0.0, np.nan)
     return out
 
@@ -143,17 +173,19 @@ def swing_levels(df: pd.DataFrame, lookback: int = SWING_LOOKBACK) -> tuple[floa
 #  Composantes du score
 # =============================================================================
 
-def _trend_component(close: float, ema_fast: float, ema_slow: float) -> tuple[float, str]:
+def _trend_component(close: float, ema_fast: float, ema_slow: float,
+                     params: IndicatorParams | None = None) -> tuple[float, str]:
     """+1/-1 si EMA rapide au-dessus/en dessous de l'EMA lente, 0.5 si le prix contredit."""
-    label = f"EMA{EMA_FAST}/EMA{EMA_SLOW}"
+    p = params or INDICATOR_PROFILES["standard"]
+    label = f"EMA{p.ema_fast}/EMA{p.ema_slow}"
     if ema_fast > ema_slow:
         if close > ema_fast:
             return 1.0, f"tendance haussière ({label}, prix au-dessus)"
-        return 0.5, f"tendance haussière ({label}) mais prix sous l'EMA{EMA_FAST}"
+        return 0.5, f"tendance haussière ({label}) mais prix sous l'EMA{p.ema_fast}"
     if ema_fast < ema_slow:
         if close < ema_fast:
             return -1.0, f"tendance baissière ({label}, prix en dessous)"
-        return -0.5, f"tendance baissière ({label}) mais prix au-dessus de l'EMA{EMA_FAST}"
+        return -0.5, f"tendance baissière ({label}) mais prix au-dessus de l'EMA{p.ema_fast}"
     return 0.0, f"{label} à plat"
 
 
@@ -187,13 +219,15 @@ def _rsi_component(rsi: float) -> tuple[float, str]:
 #  Signal technique
 # =============================================================================
 
-def signal_from_indicators(ind: pd.DataFrame, pos: int = -1) -> TechnicalSignal:
+def signal_from_indicators(ind: pd.DataFrame, pos: int = -1, params: IndicatorParams | None = None) -> TechnicalSignal:
     """
     Signal technique à la bougie clôturée `pos` d'un DataFrame déjà enrichi par
     `compute_indicators`. Ne lit que les lignes <= `pos` (aucune donnée future) :
     le backtest calcule les indicateurs une seule fois puis appelle cette fonction
     bougie par bougie, avec exactement la même notation que le bot en direct.
     """
+    p = params or active_params()
+    threshold = settings.strategy.technical_threshold
     try:
         pos = pos if pos >= 0 else len(ind) + pos
         if pos < 1 or pos >= len(ind):
@@ -203,7 +237,7 @@ def signal_from_indicators(ind: pd.DataFrame, pos: int = -1) -> TechnicalSignal:
         if any(pd.isna(last[c]) for c in needed) or pd.isna(prev["macd_hist"]):
             return _neutral("indicateurs incomplets (NaN sur la dernière bougie)")
 
-        trend, trend_reason = _trend_component(last["close"], last["ema_fast"], last["ema_slow"])
+        trend, trend_reason = _trend_component(last["close"], last["ema_fast"], last["ema_slow"], p)
         momentum, momentum_reason = _momentum_component(last["macd_hist"], prev["macd_hist"])
         rsi_value, rsi_reason = _rsi_component(last["rsi"])
 
@@ -213,9 +247,9 @@ def signal_from_indicators(ind: pd.DataFrame, pos: int = -1) -> TechnicalSignal:
             return _neutral("score technique invalide")
 
         signal: TechnicalAction = (
-            "BUY" if score >= SIGNAL_THRESHOLD else "SELL" if score <= -SIGNAL_THRESHOLD else "NEUTRAL"
+            "BUY" if score > 0 and score >= threshold else "SELL" if score < 0 and score <= -threshold else "NEUTRAL"
         )
-        swing_high, swing_low = swing_levels(ind.iloc[max(0, pos - SWING_LOOKBACK + 1):pos + 1])
+        swing_high, swing_low = swing_levels(ind.iloc[max(0, pos - p.swing_lookback + 1):pos + 1])
 
         return TechnicalSignal(
             signal=signal,

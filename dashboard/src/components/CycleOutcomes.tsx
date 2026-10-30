@@ -30,13 +30,13 @@ export function CycleOutcomes({ status }: { status: Status | null }) {
       }
     >
       {outcomes.length === 0 ? (
-        <p className="px-5 py-6 text-center text-sm text-slate-400">Aucun tour exécuté pour l'instant.</p>
+        <p className="px-4 sm:px-5 py-6 text-center text-sm text-slate-400">Aucun tour exécuté pour l'instant.</p>
       ) : (
         <ul className="divide-y divide-line">
           {outcomes.map((o) => {
             const style = OUTCOME_STYLES[o.status] ?? OUTCOME_STYLES.hold;
             return (
-              <li key={o.symbol} className="flex items-start gap-3 px-5 py-2.5 text-sm">
+              <li key={o.symbol} className="flex items-start gap-3 px-4 sm:px-5 py-2.5 text-sm">
                 <span className="w-20 shrink-0 font-semibold text-slate-200">{o.symbol}</span>
                 <span className={`shrink-0 rounded-md px-2 py-0.5 text-xs font-semibold ${style.className}`}>
                   {style.label}

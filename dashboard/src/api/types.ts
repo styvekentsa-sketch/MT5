@@ -13,7 +13,12 @@ export interface Outcome {
 export interface Status {
   state: EngineState;
   mode: Mode;
+  /** Connexion au broker active (MT5 ou exchange crypto ; nom historique) */
   mt5_connected: boolean;
+  /** Plateforme : mt5, bybit, binanceusdm... (absent sur une ancienne version du bot) */
+  broker?: string;
+  broker_description?: string;
+  market?: "forex" | "crypto";
   symbols: string[];
   timeframe: string;
   loop_interval_seconds: number;
@@ -24,8 +29,20 @@ export interface Status {
   last_outcomes: Outcome[];
 }
 
+export type AccountType = "demo" | "real" | "contest" | "paper" | "unknown";
+
 export interface Account {
+  /** Numéro de compte MT5 (0 pour un exchange crypto) */
   login: number;
+  /** Identité du compte (absente sur une ancienne version du bot) */
+  name?: string;
+  company?: string;
+  server?: string;
+  account_type?: AccountType;
+  broker?: string;
+  market?: "forex" | "crypto";
+  /** Libellé prêt à afficher : titulaire, sinon « Compte démo #login » */
+  display_name?: string;
   currency: string;
   balance: number;
   equity: number;
@@ -202,6 +219,8 @@ export interface AccountSummary {
   label: string;
   login: number;
   server: string;
+  /** mt5, ou identifiant ccxt de l'exchange (bybit, binanceusdm...) */
+  broker?: string;
   /** False si le processus du compte ne répond pas */
   reachable: boolean;
   error: string;
@@ -219,4 +238,38 @@ export interface AccountSummary {
 
 export interface AccountsList {
   accounts: AccountSummary[];
+}
+
+// --- Journal des décisions et rejets (GET /api/bot/decisions) ---
+
+export type DecisionStage = "signal" | "calendrier" | "cooldown" | "risque" | "broker" | "exécution" | "erreur";
+
+export interface BotDecision {
+  id: number;
+  timestamp: string;
+  /** Numéro du tour du moteur */
+  cycle: number | null;
+  symbol: string;
+  /** Sens envisagé, même si le trade est refusé ; null si aucun signal */
+  action: "ACHAT" | "VENTE" | null;
+  status: "ACCEPTÉ" | "REJETÉ";
+  stage: DecisionStage;
+  /** Motif précis et chiffré */
+  reason: string;
+  /** Explication complète (technique, sentiment, filtres) */
+  detail: string;
+  confidence: number | null;
+  technical_score: number | null;
+  sentiment_score: number | null;
+  hybrid_score: number | null;
+  volume: number | null;
+  ticket: number | null;
+  dry_run: boolean | null;
+}
+
+export interface BotDecisions {
+  source: "sqlite" | "memory";
+  accepted: number;
+  rejected: number;
+  items: BotDecision[];
 }

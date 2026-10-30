@@ -1,6 +1,6 @@
 # MT5 Trading Bot
 
-Bot de trading automatisé pour MetaTrader 5 combinant analyse technique et analyse fondamentale (actualités, calendrier économique, sentiment).
+Bot de trading automatisé multi-marchés — Forex / CFD via MetaTrader 5, crypto via ccxt (Binance, Bybit, OKX) — combinant analyse technique et analyse fondamentale (actualités, calendrier économique, sentiment).
 
 > Projet en cours de développement : les modules marqués « À implémenter » sont des squelettes.
 
@@ -9,7 +9,8 @@ Bot de trading automatisé pour MetaTrader 5 combinant analyse technique et anal
 ```
 config/            Paramètres (settings.py), identifiants MT5 (credentials.py), lecture du .env (env.py)
 core/              Boucle principale (engine.py) et état du bot (state_manager.py)
-brokers/           Wrapper MetaTrader 5 (mt5_client.py)
+brokers/           Interface BaseBroker (base.py), adaptateurs MT5 (mt5_broker.py, mt5_client.py) et ccxt
+                   (ccxt_broker.py), modèles communs (models.py), journal des incidents (errors.py)
 strategies/        Indicateurs (technical_analysis.py) et décision (strategy_manager.py)
 sentiment/         Actualités et calendrier (news_scraper.py), sentiment (sentiment_analyzer.py)
 risk/              Lot, SL/TP, drawdown (risk_manager.py)
@@ -144,8 +145,38 @@ Métriques : rendement total, drawdown maximal, taux de réussite, profit factor
 
 Limites : un symbole par backtest ; sentiment neutre par défaut (`--sentiment database` rejoue les articles historisés) ; calendrier uniquement via `--calendar` ; profits calculés dans la devise de cotation (exact pour les paires en USD sur un compte USD) ; swaps et glissement hors gaps non simulés.
 
+## Profils de stratégie
+
+`STRATEGY_PROFILE` fixe les valeurs par défaut de la stratégie ; toute variable renseignée dans le `.env` reste prioritaire.
+
+| | `standard` (défaut) | `scalping` | `micro` |
+|---|---|---|---|
+| Timeframe / boucle | M15 / 60 s | M1 / 10 s | M1 / 10 s |
+| Indicateurs | EMA 20/50, RSI 14, MACD 12/26/9, ATR 14 | EMA 5/13, RSI 7, MACD 5/13/4, ATR 7 | comme scalping |
+| Seuils (hybride / technique) | 0.6 / 0.3 | 0.2 / 0.2 | aucun : tout score non nul |
+| Pondération technique / sentiment | 0.7 / 0.3 | 0.85 / 0.15 | 1.0 / 0 (sentiment ignoré) |
+| SL / TP | 1.5 / 3.0 ATR, élargi au dernier plus bas / haut | 1.0 / 1.2 ATR, au moins 3 spreads | 5 / 5 pips, au moins 3 spreads |
+
+Les règles de risque (1 % par trade, perte journalière, pertes consécutives, risque cumulé) s'appliquent à l'identique. Backtest sur l'historique MT5 réel (EURUSD, GBPUSD, XAUUSD, M1 et M5, 3 jours à 4 semaines) : le profil scalping est perdant dans toutes les variantes testées (taux de réussite 20-44 %, profit factor 0.48-0.96), le spread représentant une part importante de chaque objectif. Le profil micro ouvre un signal sur presque chaque bougie M1 et perd lui aussi (taux de réussite 28-39 % pour un objectif symétrique de 5 pips, -19 à -36 % sans la limite de pertes consécutives, -0.5 à -6 % avec).
+
+## Plateformes (MT5 / crypto)
+
+Le moteur, le risque et l'API ne parlent qu'à `BaseBroker` (`connect`, `get_balance`, `get_positions`, `place_order`, `close_order`, données de marché). `BROKER_TYPE` choisit l'adaptateur :
+
+| | `mt5` (défaut) | `ccxt` |
+|---|---|---|
+| Marchés | Forex, métaux, indices, CFD | Contrats perpétuels linéaires USDT |
+| Plateformes | Tout broker MT5 (MetaQuotes, Exness avec `MT5_SYMBOL_SUFFIX=m`...) | `binanceusdm`, `bybit`, `okx`... |
+| Volume | Lots, bornés par `RISK_MIN_LOT` / `RISK_MAX_LOT` | Contrats, bornés par les limites de l'exchange (minimum, pas, valeur minimale) |
+| Spread max | `RISK_MAX_SPREAD_POINTS` | `RISK_MAX_SPREAD_PCT` (% du prix) |
+| SL / TP | Attachés à la position | Ordres conditionnels *reduce-only* ; SL refusé = position refermée aussitôt |
+
+La taille de position suit la même règle partout (perte au SL = `RISK_PER_TRADE_PCT` du capital), calculée avec la taille de contrat du marché. En PAPER sans clé API, l'adaptateur ccxt lit les données publiques réelles et utilise un capital fictif (`CCXT_PAPER_BALANCE`). Pour un vrai compte, commencer par `CCXT_ENVIRONMENT=demo` avec une clé limitée au trading (jamais de droit de retrait).
+
+Chaque incident broker (réseau, authentification, limite de requêtes, ordre refusé...) est classé et consigné dans `logs/broker_errors.log` ; `GET /api/broker` renvoie la plateforme, l'état de la connexion et les derniers incidents. Une perte de connexion déclenche une seule alerte, puis le bot se reconnecte au tour suivant.
+
 ## Multi-comptes
 
-Avec `MT5_ACCOUNTS=main,test` (voir `.env.example`), `python main.py` démarre un **superviseur** : un processus bot par compte, chacun relié à **son propre terminal MetaTrader 5** (une copie du dossier d'installation par compte), avec ses propres règles de risque (`ACCOUNT_<ID>_RISK_PER_TRADE_PCT`...), sa base SQLite (`data/trading_bot_<id>.db`) et ses logs (`logs/<id>/`). Un compte arrêté est redémarré automatiquement (5 s, 10 s... 2 min) avec une alerte.
+Avec `MT5_ACCOUNTS=main,test` (voir `.env.example`), `python main.py` démarre un **superviseur** : un processus bot par compte, chacun relié à **son propre terminal MetaTrader 5** (une copie du dossier d'installation par compte) ou, avec `ACCOUNT_<ID>_BROKER=ccxt`, à son exchange crypto, avec ses propres règles de risque (`ACCOUNT_<ID>_RISK_PER_TRADE_PCT`...), sa base SQLite (`data/trading_bot_<id>.db`) et ses logs (`logs/<id>/`). Un compte arrêté est redémarré automatiquement (5 s, 10 s... 2 min) avec une alerte. Chaque compte étant un processus distinct, la panne d'un exchange ou d'un terminal n'interrompt jamais les autres comptes.
 
 La passerelle (port `API_PORT`) expose `GET /api/accounts` (synthèse de tous les comptes) et relaie toutes les routes de chaque compte via `/api/accounts/{id}/api/...`. Le dashboard affiche alors une barre de comptes : le compte sélectionné pilote tout l'écran (positions, graphique, kill switch). Chaque alerte Telegram / Discord indique le compte concerné.

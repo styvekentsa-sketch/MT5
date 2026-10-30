@@ -25,8 +25,8 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import control, history, market, monitoring, webhooks
-from brokers.mt5_client import MT5ConnectionError
+from api.routes import bot, control, history, market, monitoring, webhooks
+from brokers.errors import BrokerConnectionError
 from config.settings import settings
 from core.engine import TradingEngine
 from utils.logger import get_logger
@@ -69,15 +69,16 @@ def create_app(engine: TradingEngine | None = None) -> FastAPI:
     app.include_router(monitoring.router)
     app.include_router(control.router)
     app.include_router(history.router)
+    app.include_router(bot.router)
     app.include_router(market.router)
     app.include_router(webhooks.journal)
     app.include_router(webhooks.receiver)
 
-    @app.exception_handler(MT5ConnectionError)
-    async def mt5_unavailable(_request: Request, exc: MT5ConnectionError) -> JSONResponse:
+    @app.exception_handler(BrokerConnectionError)
+    async def broker_unavailable(_request: Request, exc: BrokerConnectionError) -> JSONResponse:
         log.error("Requête API impossible : %s", exc)
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            content={"detail": f"MT5 indisponible : {exc}"})
+                            content={"detail": f"Broker indisponible : {exc}"})
 
     @app.get("/health", tags=["Santé"], summary="Disponibilité de l'API")
     def health() -> dict[str, str]:

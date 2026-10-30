@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from utils.database import MAX_PAGE_SIZE, Database
+from utils.database import MAX_PAGE_SIZE, SCHEMA_VERSION, Database
 
 NOW = datetime.now(timezone.utc)
 
@@ -28,7 +28,7 @@ def test_schema_and_version_created(tmp_path):
     assert db.available and (tmp_path / "sub" / "bot.db").exists()
     tables = {r["name"] for r in db._read("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"webhooks_log", "market_sentiment", "trade_decisions"} <= tables
-    assert db._read("PRAGMA user_version")[0][0] == 1
+    assert db._read("PRAGMA user_version")[0][0] == SCHEMA_VERSION
     db.close()
 
 

@@ -27,7 +27,6 @@ import itertools
 import math
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Literal, TypeVar
@@ -35,6 +34,9 @@ from typing import Any, Callable, Literal, TypeVar
 import MetaTrader5 as mt5
 import pandas as pd
 
+from brokers.base import is_dry_run, set_dry_run  # noqa: F401 - réexporté (compatibilité)
+from brokers.errors import BrokerConnectionError
+from brokers.models import AccountInfo, ClosedDeal, OrderResult, SymbolSpecs, Tick
 from config import settings
 from utils.logger import get_logger
 
@@ -44,7 +46,7 @@ OrderSide = Literal["BUY", "SELL"]
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-class MT5ConnectionError(RuntimeError):
+class MT5ConnectionError(BrokerConnectionError):
     """Levée lorsque la connexion au terminal MT5 ne peut pas être (r)établie."""
 
 
@@ -90,80 +92,23 @@ RETRYABLE_RETCODES = {
 _SYMBOL_FILLING_FOK = 1
 _SYMBOL_FILLING_IOC = 2
 
+# account_info().trade_mode -> type de compte
+_ACCOUNT_TYPES = {
+    mt5.ACCOUNT_TRADE_MODE_DEMO: "demo",
+    mt5.ACCOUNT_TRADE_MODE_CONTEST: "contest",
+    mt5.ACCOUNT_TRADE_MODE_REAL: "real",
+}
+
 _lock = threading.RLock()
 _connected = False
 _dry_run_tickets = itertools.count(-1, -1)   # tickets fictifs négatifs : jamais confondus avec des vrais
-_dry_run = settings.dry_run                 # modifiable à chaud via set_dry_run() (API de contrôle)
 
 
 # =============================================================================
 #  Structures de retour
 # =============================================================================
 
-@dataclass(frozen=True)
-class Tick:
-    symbol: str
-    bid: float
-    ask: float
-    last: float
-    spread_points: int
-    time: datetime
-
-    @property
-    def spread(self) -> float:
-        return self.ask - self.bid
-
-
-@dataclass(frozen=True)
-class AccountInfo:
-    login: int
-    balance: float
-    equity: float
-    margin: float
-    margin_free: float
-    margin_level: float
-    profit: float
-    currency: str
-    leverage: int
-
-
-@dataclass(frozen=True)
-class OrderResult:
-    success: bool
-    symbol: str
-    order_type: str
-    volume: float
-    price: float = 0.0
-    sl: float | None = None
-    tp: float | None = None
-    ticket: int = 0
-    retcode: int = 0
-    message: str = ""
-    dry_run: bool = False
-
-
-@dataclass(frozen=True)
-class SymbolSpecs:
-    symbol: str
-    digits: int
-    point: float
-    tick_size: float
-    tick_value: float                # valeur d'un tick pour 1 lot, en devise du compte
-    volume_min: float
-    volume_max: float
-    volume_step: float
-    stops_level: int                 # distance minimale SL/TP - prix, en points
-    freeze_level: int                # zone de gel autour du prix, en points
-    trade_allowed: bool
-
-
-@dataclass(frozen=True)
-class ClosedDeal:
-    ticket: int
-    symbol: str
-    time: datetime
-    net_profit: float                # profit + commission + swap + frais
-    magic: int
+# Tick, AccountInfo, OrderResult, SymbolSpecs, ClosedDeal : voir brokers.models (réexportés ici)
 
 
 # =============================================================================
@@ -347,24 +292,6 @@ def shutdown_mt5() -> None:
     log.info("Connexion MT5 fermée")
 
 
-def is_dry_run() -> bool:
-    """True en mode PAPER (ordres simulés), False en mode LIVE."""
-    return _dry_run
-
-
-def set_dry_run(enabled: bool) -> None:
-    """Bascule à chaud entre PAPER (True) et LIVE (False) ; effectif dès l'ordre suivant."""
-    global _dry_run
-    with _lock:
-        if enabled == _dry_run:
-            return
-        _dry_run = enabled
-    if enabled:
-        log.warning("Mode PAPER activé : les ordres sont désormais simulés")
-    else:
-        log.warning("Mode LIVE activé : les ordres seront ENVOYÉS au broker")
-
-
 def is_connected() -> bool:
     """True si le terminal répond et est connecté au serveur du broker."""
     with _lock:
@@ -460,6 +387,10 @@ def get_account_info() -> AccountInfo | None:
         profit=account.profit,
         currency=account.currency,
         leverage=account.leverage,
+        name=account.name,
+        company=account.company,
+        server=account.server,
+        account_type=_ACCOUNT_TYPES.get(account.trade_mode, "unknown"),
     )
 
 

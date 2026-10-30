@@ -159,7 +159,7 @@ export function FeedLog({ news, calendar, symbols }: FeedLogProps) {
       actions={<span className="text-xs text-slate-500">{entries.length} entrée(s)</span>}
     >
       <div className="space-y-2 border-b border-line px-4 py-3 sm:px-5">
-        <div className="-mx-4 flex gap-2 overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="group" aria-label="Filtrer par symbole">
+        <div className="-mx-4 flex scroll-px-4 gap-2 overflow-x-auto overscroll-x-contain px-4 sm:mx-0 sm:flex-wrap sm:px-0" role="group" aria-label="Filtrer par symbole">
           <FilterChip active={symbolFilter === "all"} onClick={() => setSymbolFilter("all")}>Tous les symboles</FilterChip>
           {symbols.map((symbol) => (
             <FilterChip key={symbol} active={symbolFilter === symbol} onClick={() => setSymbolFilter(symbol)}>
@@ -175,15 +175,15 @@ export function FeedLog({ news, calendar, symbols }: FeedLogProps) {
       </div>
 
       {news === null && calendar === null ? (
-        <div className="space-y-3 p-5">
+        <div className="space-y-3 p-4 sm:p-5">
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
         </div>
       ) : entries.length === 0 ? (
-        <p className="px-5 py-10 text-center text-sm text-slate-400">Aucune donnée capturée pour ce filtre.</p>
+        <p className="px-4 sm:px-5 py-10 text-center text-sm text-slate-400">Aucune donnée capturée pour ce filtre.</p>
       ) : (
-        <ol className="divide-y divide-line lg:max-h-[52rem] lg:overflow-y-auto lg:overscroll-contain">
+        <ol className="max-h-[75dvh] divide-y divide-line overflow-y-auto overscroll-contain lg:max-h-[52rem]">
           {entries.map((entry) => (
             <li key={entry.key} className="flex gap-3 px-4 py-3 transition hover:bg-surface-2 sm:px-5">
               <TimeColumn time={entry.time} />

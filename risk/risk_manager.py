@@ -9,6 +9,14 @@ Gestion du risque : dernier garde-fou avant l'envoi de tout ordre.
 Principe : en cas de donnée manquante, incohérente ou d'erreur, on refuse.
 Aucune fonction ne lève d'exception.
 
+Multi-marchés : les règles s'appuient sur les spécifications fournies par le broker
+(`SymbolSpecs.market`) :
+  - Forex / CFD (MT5) : volume en lots, borné par RISK_MIN_LOT / RISK_MAX_LOT et par le broker,
+    spread limité en points (RISK_MAX_SPREAD_POINTS)
+  - Crypto (ccxt)     : volume en contrats, borné par les limites de l'exchange (minimum, pas,
+    valeur minimale d'ordre), spread limité en % du prix (RISK_MAX_SPREAD_PCT)
+La perte au SL est toujours calculée par le broker (`calc_profit`), taille de contrat incluse.
+
 Usage :
     from risk.risk_manager import calculate_position_size, validate_trade_risk
 
@@ -25,11 +33,8 @@ from datetime import datetime, timezone
 from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Protocol
 
+from brokers.models import POSITION_TYPE_BUY, AccountInfo, ClosedDeal, SymbolSpecs, Tick, format_volume
 from brokers.mt5_client import (
-    AccountInfo,
-    ClosedDeal,
-    SymbolSpecs,
-    Tick,
     calc_margin,
     calc_profit,
     get_account_info,
@@ -50,11 +55,11 @@ log = get_logger(__name__)
 
 MAX_SL_DISTANCE_PCT = 10.0           # SL à plus de 10 % du prix d'entrée : jugé aberrant
 MIN_REWARD_RISK = 1.0                # le TP doit être au moins aussi loin que le SL
+REWARD_RISK_TOLERANCE = 0.98         # ratio mesuré au prix de validation : 1 tick de décalage toléré
 RISK_TOLERANCE = 1.05                # perte au SL tolérée jusqu'à 105 % du budget (arrondis broker)
 MAX_MARGIN_USAGE = 0.90              # marge requise <= 90 % de la marge libre
 VOLUME_EPSILON = 1e-9
 VOLUME_DECIMALS = 8                  # absorbe les erreurs d'arrondi flottant avant l'arrondi au pas
-POSITION_TYPE_BUY = 0                # valeur de mt5.POSITION_TYPE_BUY
 
 
 # =============================================================================
@@ -134,8 +139,19 @@ def _floor_to_step(volume: float, step: float) -> float:
 
 
 def _volume_bounds(specs: SymbolSpecs) -> tuple[float, float]:
-    """(volume minimal, volume maximal) autorisés : contraintes broker ET configuration."""
+    """
+    (volume minimal, volume maximal) autorisés. Forex : contraintes broker ET RISK_MIN_LOT /
+    RISK_MAX_LOT (exprimés en lots). Crypto : limites de l'exchange (contrats), la taille
+    restant plafonnée par le budget de risque et les règles de marge.
+    """
+    if specs.market != "forex":
+        return specs.volume_min, specs.volume_max
     return max(specs.volume_min, settings.risk.min_lot), min(specs.volume_max, settings.risk.max_lot)
+
+
+def _notional(volume: float, price: float, specs: SymbolSpecs) -> float:
+    """Valeur de la position en devise de cotation (volume x taille de contrat x prix)."""
+    return volume * specs.contract_size * price
 
 
 def _loss_per_lot(symbol: str, side: str, entry: float, sl: float, specs: SymbolSpecs,
@@ -197,15 +213,21 @@ def calculate_position_size(symbol: str, entry_price: float, sl_price: float, br
         min_volume, max_volume = _volume_bounds(specs)
         volume = _floor_to_step(min(raw_volume, max_volume), specs.volume_step)
 
+        unit = specs.volume_unit
         if volume < min_volume - VOLUME_EPSILON:
-            log.warning("[%s] Lot calculé %.4f < minimum %.2f : %.2f lot risquerait %.2f %s (budget %.2f) : pas de trade",
-                        symbol, raw_volume, min_volume, min_volume, loss_per_lot * min_volume,
-                        account.currency, budget)
+            log.warning("[%s] Volume calculé %.8g < minimum %s %s : le minimum risquerait %.2f %s (budget %.2f) : "
+                        "pas de trade", symbol, raw_volume, format_volume(min_volume, specs.volume_step), unit,
+                        loss_per_lot * min_volume, account.currency, budget)
+            return 0.0
+        if specs.min_notional and _notional(volume, entry_price, specs) < specs.min_notional:
+            log.warning("[%s] Ordre de %.2f < valeur minimale %.2f exigée par l'exchange : capital trop faible "
+                        "pour ce SL, pas de trade", symbol, _notional(volume, entry_price, specs), specs.min_notional)
             return 0.0
 
-        log.info("[%s] Lot %.2f (brut %.4f) | risque %.2f %s (%.2f%% de %.2f) | SL à %.5f du prix",
-                 symbol, volume, raw_volume, loss_per_lot * volume, account.currency,
-                 settings.risk.risk_per_trade_pct, _risk_capital(account), abs(entry_price - sl_price))
+        log.info("[%s] Volume %s %s (brut %.8g) | risque %.2f %s (%.2f%% de %.2f) | SL à %.5f du prix",
+                 symbol, format_volume(volume, specs.volume_step), unit, raw_volume, loss_per_lot * volume,
+                 account.currency, settings.risk.risk_per_trade_pct, _risk_capital(account),
+                 abs(entry_price - sl_price))
         return volume
     except Exception:  # noqa: BLE001 - MT5ConnectionError, données broker inattendues...
         log.exception("[%s] Erreur lors du calcul de la taille de position : volume 0", symbol)
@@ -216,7 +238,12 @@ def calculate_position_size(symbol: str, entry_price: float, sl_price: float, br
 #  Contrôles avant ordre (chacun retourne la liste des violations)
 # =============================================================================
 
-def _check_spread(tick: Tick) -> list[str]:
+def _check_spread(tick: Tick, specs: SymbolSpecs) -> list[str]:
+    """Forex : spread en points. Crypto : en % du prix (un « point » BTC n'a pas le sens d'un pip)."""
+    if specs.market != "forex":
+        if tick.spread_pct > settings.risk.max_spread_pct:
+            return [f"spread {tick.spread_pct:.3f}% > maximum {settings.risk.max_spread_pct}%"]
+        return []
     if tick.spread_points > settings.risk.max_spread_points:
         return [f"spread {tick.spread_points} pts > maximum {settings.risk.max_spread_points} pts"]
     return []
@@ -262,9 +289,12 @@ def _check_daily_limits(account: AccountInfo, broker: Broker) -> list[str]:
     return failures
 
 
-def _check_volume(volume: float, specs: SymbolSpecs) -> list[str]:
+def _check_volume(volume: float, specs: SymbolSpecs, entry: float) -> list[str]:
     min_volume, max_volume = _volume_bounds(specs)
     failures = []
+    if specs.min_notional and _notional(volume, entry, specs) < specs.min_notional:
+        failures.append(f"valeur de l'ordre {_notional(volume, entry, specs):.2f} < minimum {specs.min_notional} "
+                        "exigé par l'exchange")
     if volume < min_volume - VOLUME_EPSILON:
         failures.append(f"volume {volume} < minimum {min_volume}")
     if volume > max_volume + VOLUME_EPSILON:
@@ -301,7 +331,7 @@ def _check_stops(side: str, tick: Tick, entry: float, sl: float, tp: float | Non
         failures.append(f"SL aberrant : à {sl_distance / entry * 100:.1f}% du prix (maximum {MAX_SL_DISTANCE_PCT}%)")
     if tp is not None and sl_distance > 0:
         reward_risk = abs(tp - entry) / sl_distance
-        if reward_risk < MIN_REWARD_RISK:
+        if reward_risk < MIN_REWARD_RISK * REWARD_RISK_TOLERANCE:
             failures.append(f"ratio rendement/risque {reward_risk:.2f} < minimum {MIN_REWARD_RISK}")
     return failures
 
@@ -441,7 +471,8 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
         listées), `failed_checks`, `entry_price`, `risk_amount`, `risk_pct` et les
         paramètres de l'ordre. Toute erreur ou donnée manquante => `is_approved: False`.
 
-    `broker` : source des données (MT5 réel par défaut, broker simulé en backtest).
+    `broker` : source des données (MT5 réel par défaut, `BaseBroker` du moteur pour un
+    exchange crypto, broker simulé en backtest).
     """
     broker = broker or LIVE_BROKER
     side = action.strip().upper() if isinstance(action, str) else ""
@@ -477,10 +508,10 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
 
         # 3. Règles de risque (toutes évaluées pour un motif complet)
         failures = (
-            _check_spread(tick)
+            _check_spread(tick, specs)
             + _check_exposure(symbol, broker)
             + _check_daily_limits(account, broker)
-            + _check_volume(volume, specs)
+            + _check_volume(volume, specs, entry)
             + _check_stops(side, tick, entry, sl, tp, specs)
         )
         risk_failures, potential_loss, margin = _check_risk_and_margin(

@@ -24,7 +24,10 @@ class StatusOut(BaseModel):
     state: Literal["running", "paused", "stopped"] = Field(
         description="running = boucle active, paused = boucle active sans nouveaux trades, stopped = boucle arrêtée")
     mode: Mode
-    mt5_connected: bool
+    mt5_connected: bool = Field(description="Connexion au broker active (MT5 ou exchange, nom historique)")
+    broker: str = Field("mt5", description="Plateforme : mt5, bybit, binanceusdm...")
+    broker_description: str = ""
+    market: Literal["forex", "crypto"] = "forex"
     symbols: list[str]
     timeframe: str
     loop_interval_seconds: int
@@ -36,7 +39,14 @@ class StatusOut(BaseModel):
 
 
 class AccountOut(BaseModel):
-    login: int
+    login: int = Field(description="Numéro de compte MT5 (0 pour un exchange crypto)")
+    name: str = Field(description="Titulaire du compte (MT5) ou nom du compte API (exchange)")
+    company: str = Field(description="Broker ou exchange (ex : Exness Technologies Ltd, Bybit)")
+    server: str = Field(description="Serveur MT5 (ex : Exness-MT5Real8) ou exchange · environnement")
+    account_type: Literal["demo", "real", "contest", "paper", "unknown"]
+    broker: str = Field(description="Plateforme : mt5, bybit, binanceusdm...")
+    market: Literal["forex", "crypto"]
+    display_name: str = Field(description="Libellé prêt à afficher : nom du titulaire, sinon « Compte démo #login »")
     currency: str
     balance: float
     equity: float
@@ -243,6 +253,8 @@ class DecisionHistoryItem(BaseModel):
     ticket: int | None
     dry_run: bool | None
     detail: str
+    direction: str | None = Field(None, description="BUY / SELL envisagé, même si le trade a été refusé")
+    verdict: str = Field("", description="Motif principal de la décision, court et chiffré")
 
 
 class ArticleHistoryItem(BaseModel):
@@ -309,6 +321,7 @@ class AccountSummaryOut(BaseModel):
     label: str
     login: int
     server: str
+    broker: str = Field("mt5", description="mt5 ou identifiant ccxt de l'exchange")
     reachable: bool = Field(description="False si le processus du compte ne répond pas")
     error: str = ""
     state: Literal["running", "paused", "stopped"] | None = None
@@ -325,3 +338,50 @@ class AccountSummaryOut(BaseModel):
 
 class AccountsOut(BaseModel):
     accounts: list[AccountSummaryOut]
+
+
+# --- Broker : plateforme et journal central des incidents ---
+
+class BrokerErrorOut(BaseModel):
+    time: datetime
+    broker: str
+    operation: str
+    kind: Literal["network", "auth", "rate_limit", "insufficient_funds", "invalid_order", "exchange", "unknown"]
+    message: str
+
+
+class BrokerOut(BaseModel):
+    name: str
+    description: str
+    market: Literal["forex", "crypto"]
+    connected: bool
+    errors: list[BrokerErrorOut] = Field(description="Derniers incidents, du plus récent au plus ancien")
+
+
+# --- Journal des décisions et rejets (GET /api/bot/decisions) ---
+
+class BotDecisionOut(BaseModel):
+    id: int
+    timestamp: datetime
+    cycle: int | None = Field(description="Numéro du tour du moteur")
+    symbol: str
+    action: Literal["ACHAT", "VENTE"] | None = Field(description="Sens envisagé ; null si aucun signal")
+    status: Literal["ACCEPTÉ", "REJETÉ"]
+    stage: Literal["signal", "calendrier", "cooldown", "risque", "broker", "exécution", "erreur"] = Field(
+        description="Étape où la décision a été prise")
+    reason: str = Field(description="Motif précis (ex : « Score hybride +0.42 sous le seuil de ±0.60 »)")
+    detail: str = Field(description="Explication complète (analyse technique, sentiment, filtres)")
+    confidence: int | None
+    technical_score: float | None
+    sentiment_score: float | None
+    hybrid_score: float | None
+    volume: float | None
+    ticket: int | None
+    dry_run: bool | None
+
+
+class BotDecisionsOut(BaseModel):
+    source: Literal["sqlite", "memory"] = Field(description="memory si la base SQLite est indisponible")
+    accepted: int = Field(description="Décisions acceptées parmi les éléments retournés")
+    rejected: int
+    items: list[BotDecisionOut] = Field(description="De la plus récente à la plus ancienne")

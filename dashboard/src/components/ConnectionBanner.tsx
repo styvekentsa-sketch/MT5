@@ -43,7 +43,9 @@ export function ConnectionBanner({ online, baseUrl, error, status }: ConnectionB
     error?.kind === "unavailable" || error?.kind === "http"
       ? error.message
       : status && !status.mt5_connected
-        ? "Le terminal MetaTrader 5 n'est pas connecté au broker : aucun ordre ne peut être passé."
+        ? !status.broker || status.broker === "mt5"
+          ? "Le terminal MetaTrader 5 n'est pas connecté au broker : aucun ordre ne peut être passé."
+          : `L'exchange ${status.broker} ne répond pas : aucun ordre ne peut être passé (reconnexion automatique en cours).`
         : null;
   if (!warning) return null;
 

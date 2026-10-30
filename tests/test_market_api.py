@@ -7,10 +7,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import create_app
-from api.routes import market
 from brokers.mt5_client import MT5ConnectionError
 from core.engine import TradingEngine
 from tests.conftest import TEST_API_KEY
+from tests.fakes import FakeBroker
 
 AUTH = {"X-API-Key": TEST_API_KEY}
 
@@ -25,10 +25,12 @@ def client(monkeypatch, eurusd_specs, eurusd_tick):
         return pd.DataFrame({"open": 1.1, "high": 1.102, "low": 1.099, "close": 1.101, "volume": 42,
                              "spread": 10, "real_volume": 0}, index=index)
 
-    monkeypatch.setattr(market, "get_historical_data", history)
-    monkeypatch.setattr(market, "get_symbol_specs", lambda symbol: eurusd_specs)
-    monkeypatch.setattr(market, "get_current_tick", lambda symbol: eurusd_tick)
-    test_client = TestClient(create_app(TradingEngine(symbols=["EURUSD"])))
+    broker = FakeBroker()
+    broker.get_historical_data = history
+    broker.specs = {"EURUSD": eurusd_specs}
+    broker.ticks = {"EURUSD": eurusd_tick}
+    test_client = TestClient(create_app(TradingEngine(symbols=["EURUSD"], broker=broker)))
+    test_client.broker = broker
     test_client.calls = calls
     return test_client
 
@@ -58,24 +60,24 @@ def test_candles_requires_api_key(client):
 
 
 def test_candles_mt5_errors(client, monkeypatch):
-    monkeypatch.setattr(market, "get_historical_data", lambda symbol, count, timeframe: pd.DataFrame())
+    monkeypatch.setattr(client.broker, "get_historical_data", lambda symbol, count, timeframe: pd.DataFrame())
     assert client.get("/api/market/candles?symbol=EURUSD", headers=AUTH).status_code == 503
 
     def unknown(symbol, count, timeframe):
         raise ValueError("Symbole inconnu chez le broker")
 
-    monkeypatch.setattr(market, "get_historical_data", unknown)
+    monkeypatch.setattr(client.broker, "get_historical_data", unknown)
     assert client.get("/api/market/candles?symbol=EURUSD", headers=AUTH).status_code == 404
 
     def disconnected(symbol, count, timeframe):
         raise MT5ConnectionError("terminal fermé")
 
-    monkeypatch.setattr(market, "get_historical_data", disconnected)
+    monkeypatch.setattr(client.broker, "get_historical_data", disconnected)
     assert client.get("/api/market/candles?symbol=EURUSD", headers=AUTH).status_code == 503
 
 
 def test_tick_unavailable_is_tolerated(client, monkeypatch):
-    monkeypatch.setattr(market, "get_current_tick", lambda symbol: None)
-    monkeypatch.setattr(market, "get_symbol_specs", lambda symbol: None)
+    monkeypatch.setattr(client.broker, "get_current_tick", lambda symbol: None)
+    monkeypatch.setattr(client.broker, "get_symbol_specs", lambda symbol: None)
     body = client.get("/api/market/candles?symbol=EURUSD", headers=AUTH).json()
     assert body["bid"] is None and body["digits"] == 5

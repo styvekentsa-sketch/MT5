@@ -24,21 +24,21 @@ export function CalendarTimeline({ events, blockWindow }: CalendarTimelineProps)
       icon={<CalendarClock className="size-4" />}
       actions={
         blockWindow && (
-          <span className="text-[11px] text-slate-500">
+          <span className="hidden truncate text-[11px] text-slate-500 sm:inline">
             blocage {blockWindow[0]} min avant → {blockWindow[1]} min après
           </span>
         )
       }
     >
       {events === null ? (
-        <div className="space-y-3 p-5">
+        <div className="space-y-3 p-4 sm:p-5">
           <Skeleton className="h-12 w-full" />
           <Skeleton className="h-12 w-full" />
         </div>
       ) : (
         <>
           {blocking.length > 0 && (
-            <div className="flex items-start gap-3 border-b border-rose-500/20 bg-rose-500/10 px-5 py-3 text-sm text-rose-200">
+            <div className="flex items-start gap-3 border-b border-rose-500/20 bg-rose-500/10 px-4 sm:px-5 py-3 text-sm text-rose-200">
               <Ban className="mt-0.5 size-4 shrink-0" aria-hidden />
               <p>
                 <span className="font-semibold">Nouveaux trades bloqués</span> :{" "}
@@ -48,11 +48,11 @@ export function CalendarTimeline({ events, blockWindow }: CalendarTimelineProps)
           )}
 
           {events.length === 0 ? (
-            <p className="px-5 py-8 text-center text-sm text-slate-400">
+            <p className="px-4 sm:px-5 py-8 text-center text-sm text-slate-400">
               Aucune annonce à fort impact prévue pour les devises suivies.
             </p>
           ) : (
-            <ol className="relative space-y-1 px-5 py-4">
+            <ol className="relative max-h-[60dvh] space-y-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-5 lg:max-h-[36rem]">
               <span className="absolute top-6 bottom-6 left-[1.6rem] w-px bg-line" aria-hidden />
               {events.map((event) => {
                 const style = STATUS[event.status];

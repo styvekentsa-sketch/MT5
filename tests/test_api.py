@@ -1,4 +1,4 @@
-"""API FastAPI : authentification, CORS, monitoring et contrôle (MT5 simulé)."""
+"""API FastAPI : authentification, CORS, monitoring et contrôle (broker simulé)."""
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -6,15 +6,16 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from api import dependencies
 from api.main import create_app
-from api.routes import control, monitoring
-from brokers import mt5_client
-from brokers.mt5_client import MT5ConnectionError, OrderResult
+from api.routes import monitoring
+from brokers import base as broker_base
+from brokers.errors import clear_errors, record_error
+from brokers.mt5_client import MT5ConnectionError
 from config import settings
 from core.engine import TradingEngine
 from sentiment.news_scraper import NewsArticle
 from tests.conftest import TEST_API_KEY
+from tests.fakes import FakeBroker
 
 AUTH = {"X-API-Key": TEST_API_KEY}
 
@@ -26,15 +27,19 @@ def _position(ticket=1001, magic=None, sl=0.0):
 
 
 @pytest.fixture
-def engine() -> TradingEngine:
-    return TradingEngine(symbols=["EURUSD"])
+def broker() -> FakeBroker:
+    return FakeBroker()
 
 
 @pytest.fixture
-def client(engine, monkeypatch):
-    monkeypatch.setattr(dependencies, "is_connected", lambda: True)
+def engine(broker) -> TradingEngine:
+    return TradingEngine(symbols=["EURUSD"], broker=broker)
+
+
+@pytest.fixture
+def client(engine):
     yield TestClient(create_app(engine))
-    mt5_client.set_dry_run(True)                             # ne jamais laisser le mode LIVE actif
+    broker_base.set_dry_run(True)                            # ne jamais laisser le mode LIVE actif
 
 
 # ----------------------------------------------------------------- sécurité
@@ -63,31 +68,39 @@ def test_status(client):
     body = client.get("/api/status", headers=AUTH).json()
     assert body["state"] == "stopped" and body["mode"] == "PAPER" and body["mt5_connected"] is True
     assert body["symbols"] == ["EURUSD"]
+    assert body["broker"] == "fake" and body["market"] == "forex"
 
 
-def test_account_daily_pl(client, monkeypatch, account):
-    monkeypatch.setattr(monitoring, "get_account_info", lambda: account.__class__(**{**account.__dict__, "profit": -20.0}))
-    monkeypatch.setattr(monitoring, "get_closed_deals",
-                        lambda since: [SimpleNamespace(net_profit=120.0)])
+def test_broker_route_lists_central_error_journal(client, broker):
+    clear_errors()
+    record_error("bybit", "lecture du solde", ConnectionError("timeout"))
+    body = client.get("/api/broker", headers=AUTH).json()
+    assert body["name"] == "fake" and body["connected"] is True
+    assert body["errors"][0]["broker"] == "bybit" and body["errors"][0]["kind"] == "network"
+    clear_errors()
+
+
+def test_account_daily_pl(client, broker, account):
+    broker.account = account.__class__(**{**account.__dict__, "profit": -20.0})
+    broker.deals = [SimpleNamespace(net_profit=120.0)]
     body = client.get("/api/account", headers=AUTH).json()
     assert body["realized_pl_today"] == 120.0 and body["daily_pl"] == 100.0
     assert body["daily_pl_pct"] == pytest.approx(100 / (10_000 - 120) * 100, abs=1e-3)
 
 
-def test_account_unavailable_returns_503(client, monkeypatch):
-    monkeypatch.setattr(monitoring, "get_account_info", lambda: None)
-    assert client.get("/api/account", headers=AUTH).status_code == 503
+def test_account_unavailable_returns_503(client, broker, monkeypatch):
+    assert client.get("/api/account", headers=AUTH).status_code == 503       # solde indisponible
 
     def boom():
         raise MT5ConnectionError("terminal fermé")
 
-    monkeypatch.setattr(monitoring, "get_account_info", boom)
+    monkeypatch.setattr(broker, "get_balance", boom)
     response = client.get("/api/account", headers=AUTH)
-    assert response.status_code == 503 and "MT5" in response.json()["detail"]
+    assert response.status_code == 503 and "terminal fermé" in response.json()["detail"]
 
 
-def test_positions(client, monkeypatch):
-    monkeypatch.setattr(monitoring, "get_open_positions", lambda bot_only: [_position(), _position(1002, magic=0)])
+def test_positions(client, broker):
+    broker.positions = [_position(), _position(1002, magic=0)]
     body = client.get("/api/positions", headers=AUTH).json()
     assert [p["ticket"] for p in body] == [1001, 1002]
     assert body[0]["type"] == "BUY" and body[0]["sl"] is None and body[0]["is_bot"] is True
@@ -114,31 +127,36 @@ def test_pause_and_start(client, engine):
 
 def test_switching_to_live_requires_confirmation(client):
     assert client.post("/api/control/mode", headers=AUTH, json={"dry_run": False}).status_code == 400
-    assert mt5_client.is_dry_run() is True
+    assert broker_base.is_dry_run() is True
     response = client.post("/api/control/mode", headers=AUTH, json={"dry_run": False, "confirm": "LIVE"})
-    assert response.json()["mode"] == "LIVE" and mt5_client.is_dry_run() is False
+    assert response.json()["mode"] == "LIVE" and broker_base.is_dry_run() is False
     assert client.post("/api/control/mode", headers=AUTH, json={"dry_run": True}).json()["mode"] == "PAPER"
 
 
-def test_kill_switch_pauses_and_force_closes(client, engine, monkeypatch):
-    closed = []
-    monkeypatch.setattr(control, "get_open_positions", lambda bot_only: [_position(1001), _position(1002)])
-
-    def close(ticket, comment="", force=False):
-        closed.append((ticket, force))
-        return OrderResult(ticket == 1001, "EURUSD", "CLOSE", 0.5, ticket=ticket,
-                           message="" if ticket == 1001 else "marché fermé")
-
-    monkeypatch.setattr(control, "close_position", close)
+def test_kill_switch_pauses_and_force_closes(client, engine, broker):
+    broker.positions = [_position(1001), _position(1002)]
+    broker.close_ok = lambda ticket: ticket == 1001
     body = client.post("/api/control/kill-switch", headers=AUTH, json={"include_manual": True}).json()
     assert body["closed"] == 1 and body["failed"] == 1 and body["engine_paused"] is True
-    assert closed == [(1001, True), (1002, True)] and engine.is_paused
+    assert broker.closed == [(1001, True), (1002, True)] and engine.is_paused
 
 
-def test_close_single_position(client, monkeypatch):
-    monkeypatch.setattr(control, "get_open_positions", lambda bot_only: [_position(1001)])
-    monkeypatch.setattr(control, "close_position",
-                        lambda ticket, comment="", force=False: OrderResult(force, "EURUSD", "CLOSE", 0.5, ticket=ticket))
+def test_close_single_position(client, broker):
+    broker.positions = [_position(1001)]
     assert client.post("/api/control/positions/1001/close", headers=AUTH).json()["success"] is True
+    assert broker.closed == [(1001, True)]                    # clôture forcée : réelle même en PAPER
     assert client.post("/api/control/positions/9999/close", headers=AUTH).status_code == 404
     assert client.post("/api/control/positions/abc/close", headers=AUTH).status_code == 422
+
+
+def test_account_exposes_identity(client, broker, account):
+    from dataclasses import replace
+    broker.account = replace(account, name="Styve Kentsa", company="Exness Technologies Ltd",
+                             server="Exness-MT5Real8", account_type="real")
+    body = client.get("/api/account", headers=AUTH).json()
+    assert body["display_name"] == "Styve Kentsa" and body["company"] == "Exness Technologies Ltd"
+    assert body["server"] == "Exness-MT5Real8" and body["account_type"] == "real"
+    assert body["broker"] == "fake" and body["market"] == "forex" and body["login"] == 12345678
+
+    broker.account = replace(account, name="", account_type="demo")          # titulaire inconnu
+    assert client.get("/api/account", headers=AUTH).json()["display_name"] == "Compte démo #12345678"

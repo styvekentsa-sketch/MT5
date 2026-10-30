@@ -2,13 +2,22 @@
 
 import pytest
 
-from brokers.mt5_client import OrderResult
+from brokers.models import OrderResult
 from core import engine as eng
 from core.engine import TradingEngine
+from tests.fakes import FakeBroker
+
+
+@pytest.fixture(autouse=True)
+def broker(monkeypatch) -> FakeBroker:
+    """Broker du processus remplacé par un broker factice (aucun MT5 ni exchange)."""
+    fake = FakeBroker()
+    monkeypatch.setattr(eng, "get_broker", lambda: fake)
+    return fake
 
 
 @pytest.fixture
-def pipeline(monkeypatch):
+def pipeline(monkeypatch, broker):
     """Dépendances du moteur simulées ; `calls` enregistre les ordres envoyés."""
     state = {"news": False, "decision": {"action": "BUY", "confidence": 72, "entry_price": 1.1,
                                          "suggested_sl": 1.098, "suggested_tp": 1.104, "reason": "test"},
@@ -20,13 +29,12 @@ def pipeline(monkeypatch):
         return OrderResult(state["order_ok"], symbol, action, volume, price=1.1, sl=sl, tp=tp, ticket=-1,
                            message="" if state["order_ok"] else "refusé par le broker", dry_run=True)
 
-    monkeypatch.setattr(eng, "ensure_connection", lambda: None)
     monkeypatch.setattr(eng, "is_high_impact_news_imminent", lambda symbol: state["news"])
-    monkeypatch.setattr(eng, "evaluate_market", lambda symbol: dict(state["decision"], symbol=symbol))
-    monkeypatch.setattr(eng, "calculate_position_size", lambda symbol, entry, sl: state["volume"])
+    monkeypatch.setattr(eng, "evaluate_market", lambda symbol, broker: dict(state["decision"], symbol=symbol))
+    monkeypatch.setattr(eng, "calculate_position_size", lambda symbol, entry, sl, broker: state["volume"])
     monkeypatch.setattr(eng, "validate_trade_risk",
-                        lambda symbol, action, volume, sl, tp: {"is_approved": state["approved"], "reason": "test"})
-    monkeypatch.setattr(eng, "execute_order", execute)
+                        lambda symbol, action, volume, sl, tp, broker: {"is_approved": state["approved"], "reason": "test"})
+    monkeypatch.setattr(broker, "place_order", execute)
     return state, calls
 
 
@@ -75,7 +83,7 @@ def test_missing_sl_is_rejected(pipeline):
 def test_error_on_one_symbol_does_not_stop_the_others(pipeline, monkeypatch):
     state, calls = pipeline
 
-    def evaluate(symbol):
+    def evaluate(symbol, broker):
         if symbol == "EURUSD":
             raise RuntimeError("bug")
         return dict(state["decision"], symbol=symbol)
@@ -85,11 +93,11 @@ def test_error_on_one_symbol_does_not_stop_the_others(pipeline, monkeypatch):
     assert [c["symbol"] for c in calls] == ["XAUUSD"]
 
 
-def test_cycle_skipped_when_mt5_unavailable(pipeline, monkeypatch):
+def test_cycle_skipped_when_broker_unavailable(pipeline, broker, monkeypatch):
     def boom():
         raise ConnectionError("MT5 indisponible")
 
-    monkeypatch.setattr(eng, "ensure_connection", boom)
+    monkeypatch.setattr(broker, "ensure_connection", boom)
     assert TradingEngine(symbols=["EURUSD"]).step() == []
 
 
@@ -102,16 +110,15 @@ def test_pause_resume_and_stop_flags():
     assert not engine.is_paused
 
 
-def test_run_returns_false_when_initial_connection_fails(monkeypatch):
-    monkeypatch.setattr(eng, "connect_mt5", lambda: False)
+def test_run_returns_false_when_initial_connection_fails(broker, monkeypatch):
+    broker.connected = False
     monkeypatch.setattr(eng.TradingEngine, "_install_signal_handlers", lambda self: None)
     assert TradingEngine(symbols=["EURUSD"]).run() is False
 
 
-def test_run_loop_stops_cleanly(pipeline, monkeypatch):
+def test_run_loop_stops_cleanly(pipeline, broker, monkeypatch):
     shutdowns = []
-    monkeypatch.setattr(eng, "connect_mt5", lambda: True)
-    monkeypatch.setattr(eng, "shutdown_mt5", lambda: shutdowns.append(True))
+    monkeypatch.setattr(broker, "disconnect", lambda: shutdowns.append(True))
     monkeypatch.setattr(eng.TradingEngine, "_install_signal_handlers", lambda self: None)
     engine = TradingEngine(symbols=["EURUSD"], interval_seconds=1)
     original_step = engine.step
@@ -158,8 +165,6 @@ def test_no_alert_for_normal_trade_or_hold(pipeline, alerts):
 
 
 def test_start_and_stop_alerts(pipeline, alerts, monkeypatch):
-    monkeypatch.setattr(eng, "connect_mt5", lambda: True)
-    monkeypatch.setattr(eng, "shutdown_mt5", lambda: None)
     monkeypatch.setattr(eng.TradingEngine, "_install_signal_handlers", lambda self: None)
     engine = TradingEngine(symbols=["EURUSD"], interval_seconds=1)
     engine.step = lambda: engine.stop() or []
@@ -167,8 +172,8 @@ def test_start_and_stop_alerts(pipeline, alerts, monkeypatch):
     assert [a["title"] for a in alerts] == ["Bot démarré", "Bot arrêté"]
 
 
-def test_failed_start_alert(alerts, monkeypatch):
-    monkeypatch.setattr(eng, "connect_mt5", lambda: False)
+def test_failed_start_alert(alerts, broker, monkeypatch):
+    broker.connected = False
     monkeypatch.setattr(eng.TradingEngine, "_install_signal_handlers", lambda self: None)
     assert TradingEngine(symbols=["EURUSD"]).run() is False
     assert alerts[0]["title"] == "Démarrage impossible" and alerts[0]["level"] == eng.Level.CRITICAL
@@ -180,7 +185,7 @@ def test_every_decision_is_recorded(pipeline, isolated_database, monkeypatch):
     state, _ = pipeline
     state["decision"] = dict(state["decision"], technical_score=0.9, sentiment_score=0.1, hybrid_score=0.66)
 
-    def evaluate(symbol):
+    def evaluate(symbol, broker):
         if symbol == "GBPUSD":
             raise RuntimeError("bug")
         return dict(state["decision"], symbol=symbol)

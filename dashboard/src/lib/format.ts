@@ -1,12 +1,22 @@
 const LOCALE = "fr-FR";
 
+/**
+ * Montant au centime près : toujours 2 décimales (100 000,50 USD, 0,07 USD), quelle que soit
+ * la devise. Code ISO (« USD ») plutôt que symbole localisé (« $US ») : convention des terminaux.
+ */
 export function formatMoney(value: number, currency: string): string {
+  const cents = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
   try {
-    // Code ISO (« USD ») plutôt que symbole localisé (« $US ») : convention des terminaux de marché
-    return new Intl.NumberFormat(LOCALE, { style: "currency", currency, currencyDisplay: "code", maximumFractionDigits: 2 }).format(value);
+    return new Intl.NumberFormat(LOCALE, { style: "currency", currency, currencyDisplay: "code", ...cents }).format(value);
   } catch {
-    return `${formatNumber(value, 2)} ${currency}`; // code devise non reconnu par Intl
+    return `${new Intl.NumberFormat(LOCALE, cents).format(value)} ${currency}`; // code devise non reconnu par Intl
   }
+}
+
+/** Montant signé au centime (+0,07 USD / −1,25 USD), pour les P/L. */
+export function formatSignedMoney(value: number, currency: string): string {
+  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+  return `${sign}${formatMoney(Math.abs(value), currency)}`;
 }
 
 export function formatNumber(value: number, maxDigits = 5): string {

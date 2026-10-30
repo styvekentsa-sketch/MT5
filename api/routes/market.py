@@ -1,8 +1,8 @@
 """
 Données de marché pour le graphique du dashboard (LECTURE SEULE).
 
-Expose les bougies MT5 des symboles configurés, via la même fonction que la stratégie
-(`get_historical_data`). Aucun ordre, aucune règle de risque : rien n'est modifié.
+Expose les bougies des symboles configurés, lues par le même broker que la stratégie
+(MT5 ou exchange crypto). Aucun ordre, aucune règle de risque : rien n'est modifié.
 """
 
 from __future__ import annotations
@@ -10,8 +10,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from api.schemas import CandleOut, CandlesOut
+from api.dependencies import get_active_broker
 from api.security import require_api_key
-from brokers.mt5_client import TIMEFRAMES, get_current_tick, get_historical_data, get_symbol_specs
+from brokers.base import TIMEFRAME_NAMES as TIMEFRAMES
+from brokers.base import BaseBroker
 from config.settings import settings
 from utils.logger import get_logger
 
@@ -28,6 +30,7 @@ def get_candles(
     symbol: str = Query(..., description="Symbole configuré dans TRADING_SYMBOLS"),
     timeframe: str = Query("M15", description=f"Une des valeurs : {', '.join(TIMEFRAMES)}"),
     count: int = Query(300, ge=MIN_CANDLES, le=MAX_CANDLES, description="Nombre de bougies (la dernière est en cours)"),
+    broker: BaseBroker = Depends(get_active_broker),
 ) -> CandlesOut:
     """
     Dernières bougies OHLC (prix Bid), la plus récente étant en cours de formation.
@@ -42,14 +45,14 @@ def get_candles(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Timeframe invalide : {timeframe}")
 
     try:
-        df = get_historical_data(symbol, count=count, timeframe=timeframe)
+        df = broker.get_historical_data(symbol, count=count, timeframe=timeframe)
     except ValueError as exc:                          # symbole inconnu chez le broker
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     if df.empty:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Aucune bougie disponible pour {symbol}")
 
-    specs = get_symbol_specs(symbol)
-    tick = get_current_tick(symbol)
+    specs = broker.get_symbol_specs(symbol)
+    tick = broker.get_current_tick(symbol)
     return CandlesOut(
         symbol=symbol,
         timeframe=timeframe,

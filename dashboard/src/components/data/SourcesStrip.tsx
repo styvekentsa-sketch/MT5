@@ -26,7 +26,7 @@ export function SourcesStrip({ sources }: { sources: FeedSource[] | null }) {
 
   return (
     <ul
-      className="-mx-4 flex snap-x gap-3 overflow-x-auto px-4 pb-1 lg:mx-0 lg:grid lg:grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] lg:overflow-visible lg:px-0"
+      className="-mx-4 flex snap-x scroll-px-4 gap-4 overflow-x-auto overscroll-x-contain px-4 pb-1 lg:mx-0 lg:grid lg:scroll-px-0 lg:grid-cols-[repeat(auto-fill,minmax(15rem,1fr))] lg:gap-6 lg:overflow-visible lg:px-0"
       aria-label="Sources de données"
     >
       {sources.map((source) => {

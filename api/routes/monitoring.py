@@ -13,12 +13,14 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from api.dependencies import build_status, get_engine
+from api.dependencies import build_status, get_active_broker, get_engine
 from api.routes.webhooks import ENDPOINT as WEBHOOK_ENDPOINT
 from api.routes.webhooks import webhook_stats
 from api.schemas import (
     AccountOut,
     ArticleOut,
+    BrokerErrorOut,
+    BrokerOut,
     CalendarEventOut,
     DataFeedsOut,
     FeedSourceOut,
@@ -28,7 +30,9 @@ from api.schemas import (
     StatusOut,
 )
 from api.security import require_api_key
-from brokers.mt5_client import get_account_info, get_closed_deals, get_open_positions
+from brokers.base import BaseBroker
+from brokers.errors import recent_errors
+from brokers.models import POSITION_TYPE_BUY, AccountInfo
 from config.settings import settings
 from core.engine import TradingEngine
 from sentiment.news_scraper import (
@@ -53,7 +57,6 @@ from strategies.strategy_manager import get_news_fetched_at, get_recent_news
 
 router = APIRouter(prefix="/api", tags=["Monitoring"], dependencies=[Depends(require_api_key)])
 
-POSITION_TYPE_BUY = 0                # valeur de mt5.POSITION_TYPE_BUY
 CALENDAR_HOURS_BACK = 2              # annonces passées conservées dans la timeline
 
 
@@ -63,19 +66,26 @@ def get_status(engine: TradingEngine = Depends(get_engine)) -> StatusOut:
     return build_status(engine)
 
 
-@router.get("/account", response_model=AccountOut, summary="Métriques du compte MT5")
-def get_account() -> AccountOut:
+@router.get("/account", response_model=AccountOut, summary="Métriques du compte de trading")
+def get_account(broker: BaseBroker = Depends(get_active_broker)) -> AccountOut:
     """Solde, fonds propres, marge et P/L du jour (réalisé depuis 00:00 UTC + latent)."""
-    account = get_account_info()
+    account = broker.get_balance()
     if account is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Informations du compte indisponibles")
 
     start_of_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    realized = sum(d.net_profit for d in get_closed_deals(start_of_day))
+    realized = sum(d.net_profit for d in broker.get_closed_deals(start_of_day))
     daily_pl = realized + account.profit
     start_balance = account.balance - realized
     return AccountOut(
         login=account.login,
+        name=account.name,
+        company=account.company,
+        server=account.server,
+        account_type=account.account_type,
+        broker=broker.name,
+        market=broker.market,
+        display_name=_display_name(account),
         currency=account.currency,
         balance=account.balance,
         equity=account.equity,
@@ -90,9 +100,24 @@ def get_account() -> AccountOut:
     )
 
 
+ACCOUNT_TYPE_LABELS = {"demo": "démo", "real": "réel", "contest": "concours", "paper": "PAPER", "unknown": ""}
+
+
+def _display_name(account: AccountInfo) -> str:
+    """Nom du titulaire s'il est connu, sinon « Compte démo #5058040678 » (ou le nom de l'exchange)."""
+    if account.name.strip():
+        return account.name.strip()
+    kind = ACCOUNT_TYPE_LABELS.get(account.account_type, "")
+    label = f"Compte {kind}".strip()
+    if account.login:
+        return f"{label} #{account.login}"
+    return f"{label} {account.company}".strip()
+
+
 @router.get("/positions", response_model=list[PositionOut], summary="Positions ouvertes")
 def get_positions(
     bot_only: bool = Query(False, description="Ne retourner que les positions ouvertes par le bot"),
+    broker: BaseBroker = Depends(get_active_broker),
 ) -> list[PositionOut]:
     """Positions ouvertes sur le compte, avec prix, SL/TP et profit en cours."""
     return [
@@ -112,8 +137,30 @@ def get_positions(
             is_bot=p.magic == settings.trading.magic_number,
             comment=p.comment,
         )
-        for p in get_open_positions(bot_only=bot_only)
+        for p in broker.get_positions(bot_only=bot_only)
     ]
+
+
+@router.get("/broker", response_model=BrokerOut, summary="Broker et journal des incidents")
+def get_broker_status(
+    limit: int = Query(50, ge=1, le=200, description="Nombre maximal d'incidents"),
+    broker: BaseBroker = Depends(get_active_broker),
+) -> BrokerOut:
+    """
+    Plateforme utilisée par ce compte (MT5 ou exchange crypto), état de la connexion et derniers
+    incidents du journal central (réseau, authentification, limite de requêtes, ordre refusé...).
+    """
+    try:
+        connected = broker.is_connected()
+    except Exception:  # noqa: BLE001 - le statut doit toujours répondre
+        connected = False
+    return BrokerOut(
+        name=broker.name,
+        description=broker.description,
+        market=broker.market,
+        connected=connected,
+        errors=[BrokerErrorOut(**vars(e)) for e in recent_errors(limit)],
+    )
 
 
 @router.get("/sentiment", response_model=SentimentOut, summary="Actualités et sentiment")

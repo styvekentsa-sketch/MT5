@@ -28,6 +28,7 @@ os.environ.update({
     "MT5_PATH": "",
     "TRADING_SYMBOLS": "EURUSD,XAUUSD",
     "TRADING_TIMEFRAME": "M15",
+    "STRATEGY_PROFILE": "standard",                     # indépendant du profil choisi dans le .env
     "NEWS_RSS_FEEDS": "",
     "NEWS_DEFAULT_FEEDS": "false",                     # aucun accès réseau pendant les tests
     "SENTIMENT_ENGINE": "vader",

@@ -35,7 +35,7 @@ from config.settings import settings
 from risk.risk_manager import calculate_position_size, validate_trade_risk
 from sentiment.news_scraper import NEWS_BLOCK_MINUTES_AFTER, NEWS_BLOCK_MINUTES_BEFORE, EconomicEvent, symbol_currencies
 from sentiment.sentiment_analyzer import analyze_news_items
-from strategies.strategy_manager import compute_sl_tp, decide
+from strategies.strategy_manager import compute_sl_tp, decide, pip_size
 from strategies.technical_analysis import MIN_BARS, TechnicalSignal, compute_indicators, signal_from_indicators
 from utils.logger import get_logger
 
@@ -214,7 +214,7 @@ class Backtester:
 
         stats["signal"] += 1
         entry = broker.ask if decision.action == "BUY" else broker.bid
-        sl, tp = compute_sl_tp(decision.action, entry, tech)
+        sl, tp = compute_sl_tp(decision.action, entry, tech, broker.ask - broker.bid, pip_size(self.specs))
         if sl is None:
             stats["rejected:sl_impossible"] += 1
             return

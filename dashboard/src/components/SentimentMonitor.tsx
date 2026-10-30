@@ -60,7 +60,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
       }
     >
       {!sentiment ? (
-        <div className="space-y-3 p-5">
+        <div className="space-y-3 p-4 sm:p-5">
           <Skeleton className="h-4 w-1/2" />
           <Skeleton className="h-2 w-full" />
           <Skeleton className="h-16 w-full" />
@@ -68,7 +68,7 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
         </div>
       ) : (
         <>
-          <div className="space-y-4 border-b border-line p-5">
+          <div className="space-y-4 border-b border-line p-4 sm:p-5">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-xs tracking-wide text-slate-400 uppercase">Sentiment global</p>
@@ -100,11 +100,11 @@ export function SentimentMonitor({ sentiment, lastUpdated, onRefresh }: Sentimen
           </div>
 
           {sentiment.articles.length === 0 ? (
-            <p className="px-5 py-10 text-center text-sm text-slate-400">Aucune actualité récente.</p>
+            <p className="px-4 sm:px-5 py-10 text-center text-sm text-slate-400">Aucune actualité récente.</p>
           ) : (
             <ul className="divide-y divide-line lg:max-h-[32rem] lg:overflow-y-auto lg:overscroll-contain">
               {sentiment.articles.map((article) => (
-                <li key={article.link} className="px-5 py-3 transition hover:bg-surface-2">
+                <li key={article.link} className="px-4 sm:px-5 py-3 transition hover:bg-surface-2">
                   <div className="flex items-start justify-between gap-3">
                     {isSafeUrl(article.link) ? (
                       <a
