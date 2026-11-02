@@ -40,6 +40,33 @@ VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 #   scalping : M1, indicateurs rapides, seuils bas, SL/TP serrés, boucle toutes les 10 s
 #   micro    : M1, aucun seuil (le moindre signal technique ouvre un trade), sentiment ignoré,
 #              SL et TP fixes de 5 pips
+#   adaptive : choisit à chaque tour, par symbole, entre scalping (M1), day trading (M15/H1)
+#              et swing (H1/D1) selon la session, la volatilité et la tendance de fond
+#              (strategies/regime.py) ; les réglages ci-dessous sont ceux du mode scalping
+TRAILING_MODES = ("bars", "atr", "r")       # risk/trailing.py
+
+# Stratégies à setups disponibles (strategies/registry.py), choisies par SETUP_STRATEGIES
+SETUP_STRATEGY_NAMES = ("pullback", "range_rejet", "momentum_breakout")
+# Multiplicateur de la marge de protection b par actif (breakout momentum) : actifs à fortes mèches
+DEFAULT_MARGIN_MULTIPLIERS = "XAUUSD:1.5,XAGUSD:1.5"
+MAX_MARGIN_MULTIPLIER = 5.0
+
+
+def parse_multipliers(raw: str) -> tuple[tuple[str, float], ...]:
+    """« XAUUSD:1.5,XAGUSD:2 » -> (("XAUUSD", 1.5), ("XAGUSD", 2.0))."""
+    pairs = []
+    for item in (part.strip() for part in raw.split(",")):
+        if not item:
+            continue
+        symbol, sep, value = item.partition(":")
+        try:
+            if not sep:
+                raise ValueError
+            pairs.append((symbol.strip().upper(), float(value.replace(" ", ""))))
+        except ValueError:
+            raise ConfigError(f"STRATEGY_MARGIN_MULTIPLIERS invalide : « {item} » (attendu : SYMBOLE:coefficient)") from None
+    return tuple(pairs)
+
 STRATEGY_PROFILES: dict[str, dict[str, str]] = {
     "standard": {
         "TRADING_TIMEFRAME": "M15", "BOT_LOOP_INTERVAL_SECONDS": "60",
@@ -69,7 +96,95 @@ STRATEGY_PROFILES: dict[str, dict[str, str]] = {
         "RISK_SL_ATR_MULTIPLIER": "1.0", "RISK_TP_ATR_MULTIPLIER": "1.0",
         "STRATEGY_SL_PIPS": "5", "STRATEGY_TP_PIPS": "5",
     },
+    "adaptive": {
+        "TRADING_TIMEFRAME": "M1", "BOT_LOOP_INTERVAL_SECONDS": "10",
+        "STRATEGY_TECHNICAL_WEIGHT": "1.0", "STRATEGY_SENTIMENT_WEIGHT": "0.0",
+        "STRATEGY_SIGNAL_THRESHOLD": "0", "STRATEGY_TECHNICAL_THRESHOLD": "0",
+        "STRATEGY_MIN_SL_SPREADS": "3", "STRATEGY_STRUCTURAL_SL": "false",
+        "RISK_SL_ATR_MULTIPLIER": "1.0", "RISK_TP_ATR_MULTIPLIER": "1.0",
+        "STRATEGY_SL_PIPS": "5", "STRATEGY_TP_PIPS": "5",
+    },
 }
+
+
+def _parse_hhmm(value: str, name: str) -> int:
+    """« 07:30 » -> minutes depuis 00:00 UTC."""
+    try:
+        hours, minutes = value.strip().split(":")
+        total = int(hours) * 60 + int(minutes)
+    except ValueError as exc:
+        raise ConfigError(f"{name} : heure invalide {value!r} (format HH:MM)") from exc
+    if not 0 <= total < 24 * 60:
+        raise ConfigError(f"{name} : heure hors de 00:00-23:59 ({value!r})")
+    return total
+
+
+def _parse_window(value: str, name: str) -> tuple[int, int]:
+    """« 07:00-10:00 » -> (420, 600)."""
+    try:
+        start, end = value.split("-")
+    except ValueError as exc:
+        raise ConfigError(f"{name} : plage invalide {value!r} (format HH:MM-HH:MM)") from exc
+    window = (_parse_hhmm(start, name), _parse_hhmm(end, name))
+    if window[0] >= window[1]:
+        raise ConfigError(f"{name} : la plage {value!r} doit finir après son début (même journée UTC)")
+    return window
+
+
+@dataclass(frozen=True)
+class LearningConfig:
+    """Journal des trades, analyse des pertes et mémoire des erreurs (learning/trade_memory.py)."""
+    enabled: bool
+    directory: Path                  # trade_decisions.json, loss_analysis.json, mistakes_memory.json
+    min_losses: int                  # pertes sur un même pattern avant blocage
+    min_loss_rate: float             # part de pertes minimale sur ce pattern (pertes / trades clos)
+    memory_days: int                 # un pattern sans nouvelle perte depuis N jours ne bloque plus
+
+    def validate(self) -> None:
+        if self.min_losses < 1:
+            raise ConfigError("MISTAKE_MIN_LOSSES doit être >= 1")
+        if not 0 < self.min_loss_rate <= 1:
+            raise ConfigError("MISTAKE_MIN_LOSS_RATE doit être compris entre 0 et 1")
+        if self.memory_days < 1:
+            raise ConfigError("MISTAKE_MEMORY_DAYS doit être >= 1")
+
+
+def load_learning_config(account_id: str) -> LearningConfig:
+    directory = Path(get_str("LEARNING_DIR") or "data/learning")
+    if not directory.is_absolute():
+        directory = BASE_DIR / directory
+    if account_id:                   # multi-comptes : une mémoire par compte
+        directory = directory / account_id
+    return LearningConfig(
+        enabled=get_bool("LEARNING_ENABLED", True),
+        directory=directory,
+        min_losses=get_int("MISTAKE_MIN_LOSSES", 2),
+        min_loss_rate=get_float("MISTAKE_MIN_LOSS_RATE", 0.6),
+        memory_days=get_int("MISTAKE_MEMORY_DAYS", 30),
+    )
+
+
+@dataclass(frozen=True)
+class AdaptiveConfig:
+    """Fenêtres horaires (UTC) du profil adaptive."""
+    day_windows: tuple[tuple[int, int], ...]   # ouvertures de sessions : day trading
+    liquid_hours: tuple[int, int]              # heures liquides : scalping possible
+    day_close: int                             # fermeture obligatoire des positions day trading
+
+    def validate(self) -> None:
+        if not self.day_windows:
+            raise ConfigError("ADAPTIVE_DAY_WINDOWS doit contenir au moins une plage")
+        if any(end > self.day_close for _, end in self.day_windows):
+            raise ConfigError("ADAPTIVE_DAY_CLOSE doit être après la fin des fenêtres de day trading")
+
+
+def load_adaptive_config() -> AdaptiveConfig:
+    windows = get_str("ADAPTIVE_DAY_WINDOWS") or "07:00-10:00,12:30-15:30"
+    return AdaptiveConfig(
+        day_windows=tuple(_parse_window(w, "ADAPTIVE_DAY_WINDOWS") for w in windows.split(",") if w.strip()),
+        liquid_hours=_parse_window(get_str("ADAPTIVE_LIQUID_HOURS") or "07:00-20:00", "ADAPTIVE_LIQUID_HOURS"),
+        day_close=_parse_hhmm(get_str("ADAPTIVE_DAY_CLOSE") or "20:30", "ADAPTIVE_DAY_CLOSE"),
+    )
 
 
 # =============================================================================
@@ -110,6 +225,9 @@ class RiskConfig:
     min_lot: float                   # bornes en lots : Forex / CFD (MT5) uniquement
     max_lot: float
     max_spread_pct: float = 0.15     # crypto : spread maximal en % du prix (les « points » n'y sont pas comparables)
+    max_spread_sl_pct: float = 10.0  # spread maximal en % de la distance entrée - stop loss
+    max_spread_median_ratio: float = 2.0   # spread maximal en multiple de sa médiane sur 60 minutes
+    min_net_reward_risk: float = 3.0       # ratio net estimé minimal (vérificateur indépendant)
 
     def validate(self) -> None:
         if not 0 < self.risk_per_trade_pct <= 5:
@@ -134,6 +252,12 @@ class RiskConfig:
             raise ConfigError("Contrainte non respectée : 0 < RISK_MIN_LOT <= RISK_MAX_LOT")
         if not 0 < self.max_spread_pct <= 2:
             raise ConfigError("RISK_MAX_SPREAD_PCT doit être compris entre 0 et 2 (%)")
+        if not 0 < self.max_spread_sl_pct <= 100:
+            raise ConfigError("RISK_MAX_SPREAD_SL_PCT doit être compris entre 0 et 100 (%)")
+        if self.max_spread_median_ratio < 1:
+            raise ConfigError("RISK_MAX_SPREAD_MEDIAN_RATIO doit être >= 1")
+        if not 0 < self.min_net_reward_risk <= 20:
+            raise ConfigError("RISK_MIN_NET_REWARD_RISK doit être compris entre 0 et 20")
 
 
 @dataclass(frozen=True)
@@ -147,6 +271,10 @@ class NewsConfig:
     request_timeout_seconds: int
     use_default_feeds: bool          # catalogue intégré (Bloomberg, Reuters, FXStreet, banques centrales...)
     max_per_feed: int                # équilibrage : articles retenus au plus par flux
+    block_minutes_before: int = 30   # fenêtre de sécurité autour des annonces majeures
+    block_minutes_after: int = 15
+    calendar_provider: str = "forexfactory"   # forexfactory | simulated
+    calendar_file: Path | None = None         # événements du fournisseur simulé (JSON)
 
     @property
     def has_any_source(self) -> bool:
@@ -154,6 +282,12 @@ class NewsConfig:
                     or self.alphavantage_api_key)
 
     def validate(self) -> None:
+        if not 0 <= self.block_minutes_before <= 240 or not 0 <= self.block_minutes_after <= 240:
+            raise ConfigError("NEWS_BLOCK_MINUTES_BEFORE / AFTER doivent être compris entre 0 et 240")
+        if self.calendar_provider not in ("forexfactory", "simulated"):
+            raise ConfigError("NEWS_CALENDAR_PROVIDER : forexfactory ou simulated")
+        if self.calendar_file is not None and not self.calendar_file.exists():
+            raise ConfigError(f"NEWS_CALENDAR_FILE introuvable : {self.calendar_file}")
         if self.refresh_interval_seconds < 30:
             raise ConfigError("NEWS_REFRESH_INTERVAL_SECONDS doit être >= 30 (respect des quotas API)")
         if self.lookback_hours < 1:
@@ -188,6 +322,20 @@ class StrategyConfig:
     structural_sl: bool = True           # élargir le SL jusqu'au dernier plus bas / plus haut
     sl_pips: float = 0.0                 # SL / TP fixes en pips (0 = distances ATR)
     tp_pips: float = 0.0
+    setup_strategies: tuple[str, ...] = SETUP_STRATEGY_NAMES   # mode analyste, dashboard, backtest
+    margin_multipliers: tuple[tuple[str, float], ...] = parse_multipliers(DEFAULT_MARGIN_MULTIPLIERS)
+    momentum_restart_body_atr: float = 0.0     # corps minimal de la relance en ATR(5) ; 0 = filtre désactivé
+    momentum_target_rr: float = 3.0            # ratio net visé par le TP du breakout momentum
+    momentum_breakeven_r: float = 0.0             # stop ramené à l'entrée dès +X R de gain latent ; 0 = désactivé
+    momentum_trailing_activation_r: float = 0.0   # trailing stop dès +X R de gain latent ; 0 = désactivé
+    momentum_trailing_mode: str = "bars"          # bars (plus bas des N bougies), atr (k x ATR), r (distance en R)
+    momentum_trailing_bars: int = 3
+    momentum_trailing_atr: float = 1.5
+    momentum_trailing_distance_r: float = 1.0
+
+    def margin_multiplier(self, symbol: str) -> float:
+        """Coefficient de la marge b pour `symbol` (1.0 : calcul standard)."""
+        return dict(self.margin_multipliers).get(symbol.upper(), 1.0)
 
     def validate(self) -> None:
         if self.profile not in STRATEGY_PROFILES:
@@ -198,6 +346,31 @@ class StrategyConfig:
             raise ConfigError("STRATEGY_MIN_SL_SPREADS doit être compris entre 0 et 20")
         if abs(self.technical_weight + self.sentiment_weight - 1.0) > 1e-6:
             raise ConfigError("STRATEGY_TECHNICAL_WEIGHT + STRATEGY_SENTIMENT_WEIGHT doit valoir 1.0")
+        if not 0 <= self.momentum_restart_body_atr <= 3:
+            raise ConfigError("STRATEGY_MOMENTUM_RESTART_BODY_ATR doit être compris entre 0 (désactivé) et 3")
+        if not 1 <= self.momentum_target_rr <= 10:
+            raise ConfigError("STRATEGY_MOMENTUM_TARGET_RR doit être compris entre 1 et 10")
+        for name, value in (("STRATEGY_MOMENTUM_BREAKEVEN_R", self.momentum_breakeven_r),
+                            ("STRATEGY_MOMENTUM_TRAILING_ACTIVATION_R", self.momentum_trailing_activation_r)):
+            if value and not 0.5 <= value <= 10:
+                raise ConfigError(f"{name} doit valoir 0 (désactivé) ou être compris entre 0.5 et 10")
+        if self.momentum_trailing_mode not in TRAILING_MODES:
+            raise ConfigError(f"STRATEGY_MOMENTUM_TRAILING_MODE invalide : {self.momentum_trailing_mode} "
+                              f"(attendu : {', '.join(TRAILING_MODES)})")
+        if not 1 <= self.momentum_trailing_bars <= 50:
+            raise ConfigError("STRATEGY_MOMENTUM_TRAILING_BARS doit être compris entre 1 et 50")
+        if not 0.1 <= self.momentum_trailing_atr <= 10:
+            raise ConfigError("STRATEGY_MOMENTUM_TRAILING_ATR doit être compris entre 0.1 et 10")
+        if not 0.1 <= self.momentum_trailing_distance_r <= 5:
+            raise ConfigError("STRATEGY_MOMENTUM_TRAILING_DISTANCE_R doit être compris entre 0.1 et 5")
+        for symbol, factor in self.margin_multipliers:
+            if not 1.0 <= factor <= MAX_MARGIN_MULTIPLIER:
+                raise ConfigError(f"STRATEGY_MARGIN_MULTIPLIERS : coefficient de {symbol} hors de [1, "
+                                  f"{MAX_MARGIN_MULTIPLIER:g}] ({factor:g})")
+        unknown = [name for name in self.setup_strategies if name not in SETUP_STRATEGY_NAMES]
+        if unknown or not self.setup_strategies:
+            raise ConfigError(f"SETUP_STRATEGIES invalide : {', '.join(unknown) or 'vide'} "
+                              f"(disponibles : {', '.join(SETUP_STRATEGY_NAMES)})")
         if not 0 <= self.signal_threshold <= 1:
             raise ConfigError("STRATEGY_SIGNAL_THRESHOLD doit être compris entre 0 et 1")
         if self.sl_pips < 0 or self.tp_pips < 0 or (self.sl_pips > 0) != (self.tp_pips > 0):
@@ -264,10 +437,11 @@ class NotifierConfig:
     discord_webhook_url: str = field(repr=False)
     cooldown_seconds: int
     timeout_seconds: int
+    console: bool = False             # alertes aussi affichées dans la console du bot
 
     @property
     def channels(self) -> list[str]:
-        names = []
+        names = ["Console"] if self.console else []
         if self.telegram_bot_token and self.telegram_chat_id:
             names.append("Telegram")
         if self.discord_webhook_url:
@@ -323,6 +497,8 @@ class Settings:
     database: DatabaseConfig
     instance: InstanceConfig
     accounts: tuple[AccountSpec, ...] = ()     # non vide = superviseur multi-comptes
+    adaptive: AdaptiveConfig = field(default_factory=lambda: AdaptiveConfig(((420, 600), (750, 930)), (420, 1200), 1230))
+    learning: LearningConfig = field(default_factory=lambda: LearningConfig(False, BASE_DIR / "data" / "learning", 2, 0.6, 30))
 
     @property
     def mode(self) -> str:
@@ -336,9 +512,14 @@ class Settings:
             self.broker.validate()
             if self.broker.type == "mt5":
                 self.mt5.validate()
+        if self.strategy.momentum_target_rr < self.risk.min_net_reward_risk:
+            raise ConfigError(
+                f"STRATEGY_MOMENTUM_TARGET_RR ({self.strategy.momentum_target_rr:g}) < RISK_MIN_NET_REWARD_RISK "
+                f"({self.risk.min_net_reward_risk:g}) : le vérificateur indépendant refuserait tous les setups "
+                "momentum ; abaisser aussi RISK_MIN_NET_REWARD_RISK pour tester un objectif plus proche")
         for section in (self.trading, self.risk, self.news,
                         self.sentiment, self.strategy, self.log, self.api, self.notifier,
-                        self.database):
+                        self.database, self.adaptive, self.learning):
             section.validate()
 
     def summary(self) -> str:
@@ -346,7 +527,9 @@ class Settings:
         return "\n".join([
             f"  Mode            : {'PAPER / DRY RUN (aucun ordre réel)' if self.dry_run else 'LIVE'}",
             f"  Broker          : {self.broker.summary()}",
-            *([f"  Compte MT5      : {self.mt5.account} @ {self.mt5.server}"] if self.broker.type == "mt5" else []),
+            *(["  Compte MT5      : " + ("compte ouvert dans le terminal" if self.mt5.use_terminal_session
+                                          else f"{self.mt5.account} @ {self.mt5.server}")]
+              if self.broker.type == "mt5" else []),
             f"  Symboles        : {', '.join(self.trading.symbols)} ({self.trading.timeframe})",
             f"  Risque/trade    : {self.risk.risk_per_trade_pct}% | Perte max/jour : {self.risk.max_daily_loss_pct}%",
             f"  Positions max   : {self.risk.max_open_positions} (par symbole : {self.risk.max_positions_per_symbol})"
@@ -402,10 +585,10 @@ def load_settings() -> Settings:
         risk=RiskConfig(
             risk_per_trade_pct=get_float("RISK_PER_TRADE_PCT", 1.0),
             max_daily_loss_pct=get_float("RISK_MAX_DAILY_LOSS_PCT", 3.0),
-            max_consecutive_losses=get_int("RISK_MAX_CONSECUTIVE_LOSSES", 3),
-            max_open_positions=get_int("RISK_MAX_OPEN_POSITIONS", 3),
+            max_consecutive_losses=get_int("RISK_MAX_CONSECUTIVE_LOSSES", 2),
+            max_open_positions=get_int("RISK_MAX_OPEN_POSITIONS", 2),
             max_positions_per_symbol=get_int("RISK_MAX_POSITIONS_PER_SYMBOL", 1),
-            max_total_risk_pct=get_float("RISK_MAX_TOTAL_RISK_PCT", 3.0),
+            max_total_risk_pct=get_float("RISK_MAX_TOTAL_RISK_PCT", 2.0),
             max_margin_usage_pct=get_float("RISK_MAX_MARGIN_USAGE_PCT", 50.0),
             max_spread_points=get_int("RISK_MAX_SPREAD_POINTS", 30),
             sl_atr_multiplier=float(_profiled("RISK_SL_ATR_MULTIPLIER").replace(",", ".")),
@@ -413,6 +596,9 @@ def load_settings() -> Settings:
             min_lot=get_float("RISK_MIN_LOT", 0.01),
             max_lot=get_float("RISK_MAX_LOT", 1.0),
             max_spread_pct=get_float("RISK_MAX_SPREAD_PCT", 0.15),
+            max_spread_sl_pct=get_float("RISK_MAX_SPREAD_SL_PCT", 10.0),
+            max_spread_median_ratio=get_float("RISK_MAX_SPREAD_MEDIAN_RATIO", 2.0),
+            min_net_reward_risk=get_float("RISK_MIN_NET_REWARD_RISK", 3.0),
         ),
         news=NewsConfig(
             newsapi_key=get_str("NEWSAPI_KEY"),
@@ -424,6 +610,10 @@ def load_settings() -> Settings:
             request_timeout_seconds=get_int("NEWS_REQUEST_TIMEOUT_SECONDS", 10),
             use_default_feeds=get_bool("NEWS_DEFAULT_FEEDS", True),
             max_per_feed=get_int("NEWS_MAX_PER_FEED", 15),
+            block_minutes_before=get_int("NEWS_BLOCK_MINUTES_BEFORE", 30),
+            block_minutes_after=get_int("NEWS_BLOCK_MINUTES_AFTER", 15),
+            calendar_provider=(get_str("NEWS_CALENDAR_PROVIDER") or "forexfactory").lower(),
+            calendar_file=(BASE_DIR / get_str("NEWS_CALENDAR_FILE")) if get_str("NEWS_CALENDAR_FILE") else None,
         ),
         sentiment=SentimentConfig(
             engine=get_str("SENTIMENT_ENGINE", "vader").lower(),
@@ -440,6 +630,16 @@ def load_settings() -> Settings:
             structural_sl=_profiled("STRATEGY_STRUCTURAL_SL").lower() in ("1", "true", "yes", "on", "oui"),
             sl_pips=float(_profiled("STRATEGY_SL_PIPS").replace(",", ".")),
             tp_pips=float(_profiled("STRATEGY_TP_PIPS").replace(",", ".")),
+            setup_strategies=tuple(name.lower() for name in get_list("SETUP_STRATEGIES", ",".join(SETUP_STRATEGY_NAMES))),
+            margin_multipliers=parse_multipliers(get_str("STRATEGY_MARGIN_MULTIPLIERS", DEFAULT_MARGIN_MULTIPLIERS)),
+            momentum_restart_body_atr=get_float("STRATEGY_MOMENTUM_RESTART_BODY_ATR", 0.0),
+            momentum_target_rr=get_float("STRATEGY_MOMENTUM_TARGET_RR", 3.0),
+            momentum_breakeven_r=get_float("STRATEGY_MOMENTUM_BREAKEVEN_R", 0.0),
+            momentum_trailing_activation_r=get_float("STRATEGY_MOMENTUM_TRAILING_ACTIVATION_R", 0.0),
+            momentum_trailing_mode=(get_str("STRATEGY_MOMENTUM_TRAILING_MODE", "bars") or "bars").lower(),
+            momentum_trailing_bars=get_int("STRATEGY_MOMENTUM_TRAILING_BARS", 3),
+            momentum_trailing_atr=get_float("STRATEGY_MOMENTUM_TRAILING_ATR", 1.5),
+            momentum_trailing_distance_r=get_float("STRATEGY_MOMENTUM_TRAILING_DISTANCE_R", 1.0),
         ),
         log=LogConfig(
             level=get_str("LOG_LEVEL", "INFO").upper(),
@@ -461,12 +661,15 @@ def load_settings() -> Settings:
             discord_webhook_url=get_str("DISCORD_WEBHOOK_URL"),
             cooldown_seconds=get_int("NOTIFY_COOLDOWN_SECONDS", 900),
             timeout_seconds=get_int("NOTIFY_TIMEOUT_SECONDS", 10),
+            console=get_bool("NOTIFY_CONSOLE", False),
         ),
         instance=InstanceConfig(
             account_id=get_str("BOT_ACCOUNT_ID"),
             label=get_str("BOT_ACCOUNT_LABEL"),
         ),
         accounts=accounts,
+        adaptive=load_adaptive_config(),
+        learning=load_learning_config(get_str("BOT_ACCOUNT_ID")),
         database=DatabaseConfig(
             path=db_path,
             retention_days=get_int("DB_RETENTION_DAYS", 90),

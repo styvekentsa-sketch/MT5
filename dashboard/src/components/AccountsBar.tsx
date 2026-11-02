@@ -8,9 +8,10 @@ interface AccountsBarProps {
   onSelect: (id: string) => void;
 }
 
-/** Plateforme du compte : terminal MT5 ou exchange crypto (via ccxt) */
+/** Plateforme du compte : terminal MT5, simulation ou exchange crypto (via ccxt) */
 function platform(account: AccountSummary): string {
-  return !account.broker || account.broker === "mt5" ? "MT5" : account.broker;
+  if (!account.broker || account.broker === "mt5") return "MT5";
+  return account.broker === "sim" ? "Simulation" : account.broker;
 }
 
 function stateDot(account: AccountSummary): { className: string; label: string } {
@@ -59,7 +60,7 @@ export function AccountsBar({ accounts, selected, onSelect }: AccountsBarProps) 
                 )}
               </div>
               <p className="mt-0.5 truncate font-mono text-[11px] text-slate-500">
-                {platform(account) === "MT5" ? `${account.login} · ${account.server}` : `${platform(account)} · crypto`}
+                {platform(account) === "MT5" ? `${account.login} · ${account.server}` : account.broker === "sim" ? "Simulation · données fictives" : `${platform(account)} · crypto`}
               </p>
               <div className="mt-2.5 flex items-baseline justify-between gap-2 font-mono tabular-nums">
                 <span className="text-base text-white">{money(account.balance)}</span>

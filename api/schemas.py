@@ -255,6 +255,7 @@ class DecisionHistoryItem(BaseModel):
     detail: str
     direction: str | None = Field(None, description="BUY / SELL envisagé, même si le trade a été refusé")
     verdict: str = Field("", description="Motif principal de la décision, court et chiffré")
+    mode: str | None = Field(None, description="scalping / day / swing (profil adaptive)")
 
 
 class ArticleHistoryItem(BaseModel):
@@ -366,9 +367,11 @@ class BotDecisionOut(BaseModel):
     cycle: int | None = Field(description="Numéro du tour du moteur")
     symbol: str
     action: Literal["ACHAT", "VENTE"] | None = Field(description="Sens envisagé ; null si aucun signal")
-    status: Literal["ACCEPTÉ", "REJETÉ"]
-    stage: Literal["signal", "calendrier", "cooldown", "risque", "broker", "exécution", "erreur"] = Field(
-        description="Étape où la décision a été prise")
+    status: Literal["ACCEPTÉ", "REJETÉ", "ACTION"] = Field(
+        description="ACTION : gestion d'une position (trailing, fin de session) ou coupure de sécurité")
+    stage: Literal["signal", "calendrier", "cooldown", "risque", "broker", "exécution", "erreur",
+                   "gestion", "sécurité", "mémoire", "post-mortem"] = Field(description="Étape où la décision a été prise")
+    mode: Literal["scalping", "day", "swing"] | None = Field(None, description="Style choisi (profil adaptive)")
     reason: str = Field(description="Motif précis (ex : « Score hybride +0.42 sous le seuil de ±0.60 »)")
     detail: str = Field(description="Explication complète (analyse technique, sentiment, filtres)")
     confidence: int | None
@@ -384,4 +387,5 @@ class BotDecisionsOut(BaseModel):
     source: Literal["sqlite", "memory"] = Field(description="memory si la base SQLite est indisponible")
     accepted: int = Field(description="Décisions acceptées parmi les éléments retournés")
     rejected: int
+    actions: int = Field(0, description="Actions de gestion et coupures de sécurité")
     items: list[BotDecisionOut] = Field(description="De la plus récente à la plus ancienne")

@@ -45,7 +45,7 @@ ALIASES = {
     "EXCHANGE": "CCXT_EXCHANGE", "API_KEY": "CCXT_API_KEY", "API_SECRET": "CCXT_API_SECRET",
     "API_PASSWORD": "CCXT_API_PASSWORD", "ENVIRONMENT": "CCXT_ENVIRONMENT", "LEVERAGE": "CCXT_LEVERAGE",
 }
-REQUIRED = {"mt5": ("LOGIN", "PASSWORD", "SERVER", "PATH"), "ccxt": ("EXCHANGE",)}
+REQUIRED = {"mt5": ("LOGIN", "PASSWORD", "SERVER", "PATH"), "ccxt": ("EXCHANGE",), "sim": ()}
 IDENTITY = {"LOGIN", "PASSWORD", "SERVER", "PATH", "LABEL", "BROKER", "EXCHANGE"}
 # Réglages imposés par le superviseur : non surchargeables par compte
 RESERVED = {"API_ENABLED", "API_HOST", "API_PORT", "DB_PATH", "LOG_DIR", "BOT_ROLE", "BOT_ACCOUNT_ID",
@@ -106,7 +106,7 @@ def load_accounts(environ: Mapping[str, str] | None = None) -> tuple[AccountSpec
             label=values.get("LABEL") or account_id,
             login=login,
             password=values.get("PASSWORD", ""),
-            server=values["SERVER"] if broker == "mt5" else values["EXCHANGE"].lower(),
+            server={"mt5": values.get("SERVER", ""), "ccxt": values.get("EXCHANGE", "").lower()}.get(broker, "simulation"),
             path=values.get("PATH", ""),
             port=WORKER_PORT_BASE + index,
             broker=broker,
@@ -158,6 +158,6 @@ def worker_env(account: AccountSpec, base_env: Mapping[str, str]) -> dict[str, s
     if account.broker == "mt5":
         env.update({"MT5_ACCOUNT": str(account.login), "MT5_PASSWORD": account.password,
                     "MT5_SERVER": account.server, "MT5_PATH": account.path})
-    else:
+    elif account.broker == "ccxt":
         env["CCXT_EXCHANGE"] = account.server
     return env

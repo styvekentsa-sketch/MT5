@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errorMessage, scopedConnection, type ApiError, type Connection } from "./api/client";
+import type { MT5LoginRequest } from "./api/types";
 import { AccountOverview } from "./components/AccountOverview";
 import { AccountsBar } from "./components/AccountsBar";
 import { ConnectionBanner } from "./components/ConnectionBanner";
 import { ControlPanel } from "./components/ControlPanel";
 import { CycleOutcomes } from "./components/CycleOutcomes";
 import { DecisionJournal, type DecisionFilter } from "./components/DecisionJournal";
+import { MT5LoginDialog } from "./components/MT5LoginDialog";
 import { DataFeedsPage } from "./components/data/DataFeedsPage";
+import { LearningPanel } from "./components/data/LearningPanel";
 import { MobileNav, type Tab } from "./components/MobileNav";
 import { PriceChart } from "./components/Chart";
+import { PerformancePanel } from "./components/PerformancePanel";
 import { PositionsTable } from "./components/PositionsTable";
+import { RiskLimits } from "./components/RiskLimits";
 import { SentimentMonitor } from "./components/SentimentMonitor";
+import { SetupsPanel } from "./components/SetupsPanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Toasts } from "./components/ui/Toasts";
 import { useConnection } from "./hooks/useConnection";
@@ -28,12 +34,19 @@ const SELECTED_ACCOUNT_KEY = "mt5bot.account";
 // Page « Données » : interrogée uniquement quand elle est affichée
 const DATA_FEEDS_POLL_MS = 30_000;
 const WEBHOOKS_POLL_MS = 5_000;
+const LEARNING_POLL_MS = 15_000;
+const SESSION_POLL_MS = 10_000;
 // Journal des décisions : suit le moteur tour par tour (interrogé seulement quand le panneau est affiché)
 const DECISIONS_POLL_MS = 5_000;
 const DECISIONS_LIMIT = 50;
+// Mode analyste : l'analyse des setups est mise en cache 15 s côté serveur
+const SETUPS_POLL_MS = 30_000;
+const RISK_POLL_MS = 10_000;
+const PERFORMANCE_POLL_MS = 60_000;
 
 const VIEW_TABS = [
   { label: "Trading", tab: "account" },
+  { label: "Analyse", tab: "analysis" },
   { label: "Données", tab: "data" },
 ] as const;
 
@@ -113,6 +126,8 @@ export default function App() {
     scoped.baseUrl,
   );
   const onDataView = tab === "data";
+  const onAnalysisView = tab === "analysis";
+  const onTradingView = !onDataView && !onAnalysisView;
   // À partir de la tablette (md), tous les panneaux de la vue sont affichés ensemble
   const isWide = useMediaQuery("(min-width: 768px)");
   const [decisionFilter, setDecisionFilter] = useState<DecisionFilter>("all");
@@ -122,13 +137,45 @@ export default function App() {
       [scoped, decisionFilter],
     ),
     DECISIONS_POLL_MS,
-    enabled && !onDataView && (isWide || tab === "engine"),
+    enabled && onTradingView && (isWide || tab === "engine"),
     `${scoped.baseUrl}|${decisionFilter}`,
   );
   const dataFeeds = usePolling(
     useCallback((s: AbortSignal) => api.dataFeeds(scoped, s), [scoped]),
     DATA_FEEDS_POLL_MS,
     enabled && onDataView,
+    scoped.baseUrl,
+  );
+  const session = usePolling(
+    useCallback((s: AbortSignal) => api.session(scoped, s), [scoped]),
+    SESSION_POLL_MS,
+    enabled,
+    scoped.baseUrl,
+  );
+  const [loginOpen, setLoginOpen] = useState(false);
+  const learning = usePolling(
+    useCallback((s: AbortSignal) => api.learning(scoped, s), [scoped]),
+    LEARNING_POLL_MS,
+    enabled && onDataView,
+    scoped.baseUrl,
+  );
+  // Setups : panneau « Analyse » et niveaux proposés sur le graphique de la vue « Trading »
+  const setups = usePolling(
+    useCallback((s: AbortSignal) => api.setups(scoped, s), [scoped]),
+    SETUPS_POLL_MS,
+    enabled && !onDataView,
+    scoped.baseUrl,
+  );
+  const riskLimits = usePolling(
+    useCallback((s: AbortSignal) => api.riskLimits(scoped, s), [scoped]),
+    RISK_POLL_MS,
+    enabled && onTradingView,
+    scoped.baseUrl,
+  );
+  const performance = usePolling(
+    useCallback((s: AbortSignal) => api.performance(scoped, s), [scoped]),
+    PERFORMANCE_POLL_MS,
+    enabled && onAnalysisView,
     scoped.baseUrl,
   );
   const webhookLog = usePolling(
@@ -174,6 +221,24 @@ export default function App() {
     [push, refreshLive],
   );
 
+  const { refresh: refreshSession } = session;
+
+  /** Connexion à un compte MT5 : l'erreur remonte au formulaire, le succès ferme la fenêtre. */
+  const handleLogin = async (credentials: MT5LoginRequest) => {
+    const result = await api.login(scoped, credentials);
+    setLoginOpen(false);
+    push("success", result.message || `Connecté au compte ${credentials.login}`);
+    refreshSession();
+    refreshLive();
+  };
+
+  const handleLogout = () =>
+    perform("Déconnexion", async () => {
+      const result = await api.logout(scoped);
+      refreshSession();
+      return result.message;
+    });
+
   const handleSave = (next: Connection) => {
     save(next);
     setSettingsOpen(false);
@@ -192,7 +257,7 @@ export default function App() {
 
   // Mobile (< md) : un panneau à la fois (barre de navigation). À partir de `md` : vue « Trading »
   // (tous les panneaux) ou vue « Données », selon les onglets du haut.
-  const panel = (id: Tab) => (tab === id ? "" : onDataView ? "hidden" : "hidden md:block");
+  const panel = (id: Tab) => (tab === id ? "" : onTradingView ? "hidden md:block" : "hidden");
   const { refresh: refreshDataFeeds } = dataFeeds;
   const { refresh: refreshWebhooks } = webhookLog;
 
@@ -241,7 +306,7 @@ export default function App() {
 
         <nav className="hidden gap-1 self-start rounded-md border border-line bg-surface-2 p-1 md:flex" aria-label="Vues">
           {VIEW_TABS.map(({ label, tab: target }) => {
-            const active = (target === "data") === onDataView;
+            const active = target === "account" ? onTradingView : tab === target;
             return (
               <button
                 key={target}
@@ -270,9 +335,37 @@ export default function App() {
             }}
           />
         )}
+        {onDataView && (
+          <LearningPanel report={learning.data} currency={account.data?.currency ?? "USD"} lastUpdated={learning.lastUpdated} />
+        )}
+
+        {onAnalysisView && (
+          <SetupsPanel
+            report={setups.data}
+            currency={account.data?.currency ?? "USD"}
+            lastUpdated={setups.lastUpdated}
+            onRefresh={setups.refresh}
+          />
+        )}
+        {onAnalysisView && (
+          <PerformancePanel
+            report={performance.data}
+            currency={account.data?.currency ?? "USD"}
+            lastUpdated={performance.lastUpdated}
+          />
+        )}
 
         <div className={panel("account")}>
-          <AccountOverview account={account.data} connected={apiConnected ? (status.data?.mt5_connected ?? null) : false} />
+          <AccountOverview
+            account={account.data}
+            connected={apiConnected ? (status.data?.mt5_connected ?? null) : false}
+            session={session.data}
+            onLogin={apiConnected ? () => setLoginOpen(true) : undefined}
+            onLogout={apiConnected ? handleLogout : undefined}
+          />
+          <div className="mt-4 lg:mt-6">
+            <RiskLimits limits={riskLimits.data} />
+          </div>
         </div>
 
         {/*
@@ -280,13 +373,14 @@ export default function App() {
           à gauche et actualités à droite. Bureau (xl) : graphique, positions et moteur sur 3/5,
           actualités sur 2/5 de toute la hauteur (disposition station de trading).
         */}
-        <div className={`grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5 ${onDataView ? "hidden" : ""}`}>
+        <div className={`grid grid-cols-1 items-start gap-4 md:grid-cols-2 lg:gap-6 xl:grid-cols-5 ${onTradingView ? "" : "hidden"}`}>
             <div className={`min-w-0 md:col-span-2 xl:col-span-3 xl:col-start-1 xl:row-start-1 ${panel("positions")}`}>
               <PriceChart
                 connection={scoped}
                 symbols={status.data?.symbols ?? []}
                 positions={positions.data}
-                active={enabled && !onDataView && (isWide || tab === "positions")}
+                setups={setups.data?.setups}
+                active={enabled && onTradingView && (isWide || tab === "positions")}
               />
             </div>
             <div className={`min-w-0 md:col-start-1 md:row-start-2 xl:col-span-3 ${panel("positions")}`}>
@@ -341,6 +435,12 @@ export default function App() {
           setSettingsOpen(false);
         }}
         onClose={() => setSettingsOpen(false)}
+      />
+      <MT5LoginDialog
+        open={loginOpen}
+        defaultServer={session.data?.server}
+        onSubmit={handleLogin}
+        onClose={() => setLoginOpen(false)}
       />
       <Toasts toasts={toasts} onDismiss={dismiss} />
     </div>

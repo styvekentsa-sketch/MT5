@@ -110,8 +110,8 @@ FEED_PAUSE_MAX_SECONDS = 3600        # ... dans la limite d'une heure
 FUTURE_TOLERANCE = timedelta(minutes=10)   # date de publication dans le futur : horloge du flux erronée
 
 # Fenêtre de blocage autour d'une annonce à fort impact (partagée par le moteur et le dashboard)
-NEWS_BLOCK_MINUTES_BEFORE = 15
-NEWS_BLOCK_MINUTES_AFTER = 5
+NEWS_BLOCK_MINUTES_BEFORE = settings.news.block_minutes_before   # 30 min avant une annonce majeure...
+NEWS_BLOCK_MINUTES_AFTER = settings.news.block_minutes_after     # ... jusqu'à 15 min après
 
 
 

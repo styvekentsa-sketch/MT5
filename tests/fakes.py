@@ -30,6 +30,7 @@ class FakeBroker(BaseBroker):
         self.closed: list[tuple[int, bool]] = []
         self.order_ok = True
         self.close_ok: Callable[[int], bool] = lambda ticket: True
+        self.position_deals: dict[int, list[ClosedDeal]] = {}
 
     def connect(self) -> bool:
         return self.connected
@@ -48,6 +49,9 @@ class FakeBroker(BaseBroker):
 
     def get_closed_deals(self, since: datetime, bot_only: bool = False) -> list[ClosedDeal]:
         return list(self.deals)
+
+    def get_position_deals(self, position_id: int) -> list[ClosedDeal]:
+        return list(self.position_deals.get(position_id, []))
 
     def place_order(self, symbol: str, side: str, volume: float, sl: float | None = None,
                     tp: float | None = None, comment: str = "Bot Order") -> OrderResult:

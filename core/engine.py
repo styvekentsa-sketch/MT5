@@ -30,19 +30,24 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
-from brokers.base import BaseBroker, is_dry_run
+from brokers.base import BaseBroker, is_dry_run, set_dry_run
 from brokers.factory import get_broker
 from config.settings import settings
-from risk.risk_manager import calculate_position_size, validate_trade_risk
-from sentiment.news_scraper import get_upcoming_high_impact_events, is_high_impact_news_imminent
+from learning.trade_memory import TradeMemory, market_features
+from risk.risk_manager import calculate_position_size, daily_stop_reached, validate_trade_risk
+from risk.verifier import verify_order
+from core.news_pipeline import get_pipeline, is_high_impact_news_imminent
+from strategies.regime import Mode, evaluate_adaptive, manage_positions
 from strategies.strategy_manager import evaluate_market
 from utils.database import get_database
 from utils.logger import get_logger
+from utils import alerts
 from utils.notifier import Level, get_notifier, notify
 
 log = get_logger(__name__)
 
-OutcomeStatus = Literal["traded", "hold", "news_blocked", "cooldown", "rejected", "failed", "error"]
+OutcomeStatus = Literal["traded", "hold", "news_blocked", "cooldown", "rejected", "failed", "error",
+                        "managed", "kill_switch", "memory_blocked", "trade_closed"]
 
 
 # =============================================================================
@@ -117,6 +122,10 @@ class TradingEngine:
         self.last_outcomes: tuple[SymbolOutcome, ...] = ()
         self.recent_decisions: deque[dict[str, Any]] = deque(maxlen=RECENT_DECISIONS)
         self._decision_ids = 0
+        self._position_modes: dict[int, Mode] = {}       # ticket -> mode (profil adaptive)
+        self._locked_day = None                          # jour UTC verrouillé par le stop global
+        # Journal des trades, post-mortem des pertes et mémoire des erreurs (LEARNING_ENABLED)
+        self.memory: TradeMemory | None = TradeMemory() if settings.learning.enabled else None
 
     # ------------------------------------------------------------------ cycle de vie
 
@@ -230,6 +239,14 @@ class TradingEngine:
             log.error("Tour #%d ignoré : %s indisponible (%s)", self._cycle, self.broker.name, exc)
             return outcomes
 
+        # Sécurité : stop global journalier (kill switch + verrouillage), puis gestion des positions
+        if self._enforce_daily_stop():
+            self.last_cycle_at = datetime.now(timezone.utc)
+            return outcomes
+        if self.adaptive:
+            self._manage_positions()
+        self._review_closed_trades()
+
         for symbol in self.symbols:
             if self._stop_event.is_set():
                 break
@@ -252,6 +269,93 @@ class TradingEngine:
         log.info("Tour #%d terminé en %.1fs : %s", self._cycle, duration,
                  ", ".join(f"{status} {n}" for status, n in sorted(counts.items())) or "aucun symbole")
         return outcomes
+
+    @property
+    def adaptive(self) -> bool:
+        """Profil adaptive : style choisi par symbole et gestion active des positions."""
+        return settings.strategy.profile == "adaptive"
+
+    def _enforce_daily_stop(self) -> bool:
+        """
+        Perte journalière >= RISK_MAX_DAILY_LOSS_PCT : KILL SWITCH (fermeture de toutes les positions
+        du bot, clôture réelle même en PAPER), moteur mis en pause et journée verrouillée.
+        Retourne True si le trading est verrouillé pour ce tour.
+        """
+        try:
+            reason = daily_stop_reached(self.broker)
+        except Exception:  # noqa: BLE001 - données indisponibles : les règles de risque refuseront les ordres
+            log.exception("Contrôle de la perte journalière impossible")
+            return False
+        if reason is None:
+            return False
+        today = datetime.now(timezone.utc).date()
+        positions = self.broker.get_positions(bot_only=True)
+        if self._locked_day == today and not positions:
+            return True
+        results = [self.broker.close_order(p.ticket, comment="Kill switch journalier", force=True) for p in positions]
+        failed = sum(not r.success for r in results)
+        self._locked_day = today
+        self.pause()
+        message = (f"Stop global : {reason} · {len(results) - failed} position(s) fermée(s)"
+                   f"{f', {failed} ÉCHEC(S) : vérifier le terminal' if failed else ''} · moteur verrouillé (pause)")
+        log.critical(message)
+        notify("KILL SWITCH · perte journalière", message, Level.CRITICAL, dedup_key="daily-stop")
+        self._record_decision(SymbolOutcome("TOUS", "kill_switch", reason, verdict=message))
+        return True
+
+    def _manage_positions(self) -> None:
+        """Trailing stop (swing) et fermeture de fin de session (day) ; chaque action est journalisée."""
+        try:
+            actions = manage_positions(self.broker, known=self._position_modes)
+        except Exception:  # noqa: BLE001
+            log.exception("Gestion des positions impossible ce tour")
+            return
+        for action in actions:
+            log.warning("[%s] %s", action.symbol, action.description)
+            self._record_decision(SymbolOutcome(action.symbol, "managed", action.description,
+                                                {"mode": action.mode}, ticket=action.ticket,
+                                                verdict=action.description))
+
+    def _review_closed_trades(self) -> None:
+        """Positions du journal fermées depuis le dernier tour : résultat, post-mortem des pertes, mémoire."""
+        if self.memory is None:
+            return
+        try:
+            events = self.memory.review(self.broker)
+        except Exception:  # noqa: BLE001 - l'apprentissage ne doit jamais bloquer le trading
+            log.exception("Analyse des trades clos impossible ce tour")
+            return
+        for event in events:
+            trade = event["trade"]
+            alerts.trade_closed(event)                     # pertes : conclusion du post-mortem
+            self._record_decision(SymbolOutcome(
+                trade["symbol"], "trade_closed", event["message"],
+                {"mode": trade.get("mode"), "direction": trade["side"]}, ticket=trade["ticket"],
+                verdict=event["message"]))
+
+    def _memory_check(self, symbol: str, action: str, decision: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        """Caractéristiques du marché et, si elles reproduisent un pattern perdant répété, le motif du blocage."""
+        if self.memory is None:
+            return {}, None
+        try:
+            features = market_features(self.broker, symbol, decision)
+            block = self.memory.check(symbol, action, decision.get("mode"), features)
+        except Exception:  # noqa: BLE001 - mémoire indisponible : on ne bloque pas sur une erreur interne
+            log.exception("[%s] Consultation de la mémoire des erreurs impossible", symbol)
+            return {}, None
+        return features, block.message if block else None
+
+    def on_account_switched(self) -> None:
+        """
+        Le compte du broker vient de changer (connexion depuis le dashboard) : moteur en pause et
+        mode PAPER, pour qu'aucun ordre ne parte sur ce compte sans action explicite ; l'état propre
+        à l'ancien compte (modes des positions, verrou du stop journalier, cooldowns) est oublié.
+        """
+        self.pause()
+        set_dry_run(True)
+        self._position_modes.clear()
+        self._last_trade_at.clear()
+        self._locked_day = None
 
     def _in_cooldown(self, symbol: str) -> bool:
         last = self._last_trade_at.get(symbol)
@@ -283,6 +387,7 @@ class TradingEngine:
             "detail": outcome.detail or decision.get("reason", ""),
             "direction": decision.get("direction") or (action if action in ("BUY", "SELL") else None),
             "verdict": outcome.verdict or decision.get("verdict") or outcome.detail,
+            "mode": decision.get("mode"),
         }
         self._decision_ids += 1
         self.recent_decisions.append({**record, "id": self._decision_ids})
@@ -295,24 +400,20 @@ class TradingEngine:
         """Alerte « trade bloqué », limitée à une par symbole et par cause pendant NOTIFY_COOLDOWN_SECONDS."""
         notify(f"Trade bloqué · {symbol}", f"{cause} : {detail}", Level.WARNING, dedup_key=f"{cause}:{symbol}")
 
-    def _news_detail(self, symbol: str) -> str:
-        """Annonces responsables du blocage (lues seulement si une alerte peut partir)."""
-        if not get_notifier().enabled:
-            return ""
-        events = get_upcoming_high_impact_events(symbol=symbol) or []
-        return ", ".join(f"{e.title} ({e.currency}, {e.time:%H:%M} UTC)" for e in events) or "annonce à fort impact"
-
     def _process_symbol(self, symbol: str) -> SymbolOutcome:
         """Étapes A à D pour un symbole."""
-        # A. Sécurité news
+        # A. Fenêtre de sécurité : 30 min avant -> 15 min après une annonce majeure sur l'actif
         if is_high_impact_news_imminent(symbol=symbol):
-            log.info("[%s] Annonce à fort impact imminente : symbole ignoré ce tour", symbol)
-            self._alert_blocked(symbol, "Calendrier économique", self._news_detail(symbol))
-            return SymbolOutcome(symbol, "news_blocked",
-                                 verdict="Annonce économique à fort impact imminente : symbole ignoré ce tour")
+            block = get_pipeline().safety_check(symbol)
+            reason = block.reason if block else "annonce économique à fort impact imminente"
+            log.info("[%s] Fenêtre de sécurité : %s", symbol, reason)
+            if block is None or get_pipeline().first_alert(block):     # une alerte par annonce, pas une par tour
+                self._alert_blocked(symbol, "Calendrier économique", reason)
+            return SymbolOutcome(symbol, "news_blocked", verdict=f"Fenêtre de sécurité : {reason}")
 
         # B. Évaluation stratégique
-        decision = evaluate_market(symbol, broker=self.broker)
+        decision = (evaluate_adaptive(symbol, self.broker) if self.adaptive
+                    else evaluate_market(symbol, broker=self.broker))
         action = decision.get("action", "HOLD")
         if action not in ("BUY", "SELL"):
             log.info("[%s] HOLD (confiance %s%%)", symbol, decision.get("confidence", 0))
@@ -347,8 +448,22 @@ class TradingEngine:
             return SymbolOutcome(symbol, "rejected", str(check.get("reason", "")), decision, volume=volume,
                                  verdict=f"Risque : {check.get('reason', 'règle non respectée')}")
 
-        # D. Exécution
-        comment = f"{ORDER_COMMENT_PREFIX} {action} {decision.get('confidence', 0)}%"
+        # C bis. Vérificateur indépendant : ratio net, spread, limites journalières, recalculés à part
+        verdict = verify_order(symbol, action, entry, sl, tp, self.broker)
+        if not verdict.approved:
+            self._alert_blocked(symbol, "Vérificateur", verdict.reason)
+            return SymbolOutcome(symbol, "rejected", verdict.reason, decision, volume=volume,
+                                 verdict=f"Vérificateur indépendant : {verdict.reason}")
+
+        # D. Mémoire des erreurs : pas de nouvelle position dans un contexte déjà perdant à répétition
+        features, blocked = self._memory_check(symbol, action, decision)
+        if blocked:
+            log.warning("[%s] %s", symbol, blocked)
+            self._alert_blocked(symbol, "Mémoire des erreurs", blocked)
+            return SymbolOutcome(symbol, "memory_blocked", blocked, decision, volume=volume, verdict=blocked)
+
+        # E. Exécution
+        comment = decision.get("order_comment") or f"{ORDER_COMMENT_PREFIX} {action} {decision.get('confidence', 0)}%"
         result = self.broker.place_order(symbol, action, volume, sl=sl, tp=tp, comment=comment)
         if not result.success:
             log.error("[%s] Échec de l'ordre %s %s : %s", symbol, action, volume, result.message)
@@ -356,6 +471,13 @@ class TradingEngine:
                                  verdict=f"Ordre refusé par le broker : {result.message}")
 
         self._last_trade_at[symbol] = time.monotonic()
+        if decision.get("mode"):
+            self._position_modes[result.ticket] = decision["mode"]
+        if self.memory is not None:
+            try:
+                self.memory.record_entry(result, decision, features)
+            except Exception:  # noqa: BLE001
+                log.exception("[%s] Journal d'entrée impossible pour le ticket #%s", symbol, result.ticket)
         log.info("[%s] %s%s %s @ %s | SL %s | TP %s | ticket #%d | confiance %s%%",
                  symbol, "[DRY RUN] " if result.dry_run else "", action, f"{result.volume:g}",
                  result.price, result.sl, result.tp, result.ticket, decision.get("confidence", 0))

@@ -22,11 +22,21 @@ router = APIRouter(prefix="/api/bot", tags=["Moteur"], dependencies=[Depends(req
 
 MAX_DECISIONS = 200
 ACCEPTED_STATUSES = ("traded",)
-REJECTED_STATUSES = ("hold", "news_blocked", "cooldown", "rejected", "failed", "error")
+REJECTED_STATUSES = ("hold", "news_blocked", "cooldown", "rejected", "failed", "error", "memory_blocked")
+ACTION_STATUSES = ("managed", "kill_switch", "trade_closed")
 STAGES = {
     "traded": "exécution", "hold": "signal", "news_blocked": "calendrier", "cooldown": "cooldown",
-    "rejected": "risque", "failed": "broker", "error": "erreur",
+    "rejected": "risque", "failed": "broker", "error": "erreur", "managed": "gestion", "kill_switch": "sécurité",
+    "memory_blocked": "mémoire", "trade_closed": "post-mortem",
 }
+
+
+def _status(raw: str) -> str:
+    if raw in ACCEPTED_STATUSES:
+        return "ACCEPTÉ"
+    return "ACTION" if raw in ACTION_STATUSES else "REJETÉ"
+
+
 ACTIONS = {"BUY": "ACHAT", "SELL": "VENTE"}
 
 
@@ -38,7 +48,8 @@ def _item(row: dict[str, Any]) -> BotDecisionOut:
         cycle=row.get("cycle"),
         symbol=row["symbol"],
         action=ACTIONS.get(direction or ""),
-        status="ACCEPTÉ" if row["status"] in ACCEPTED_STATUSES else "REJETÉ",
+        status=_status(row["status"]),
+        mode=row.get("mode"),
         stage=STAGES.get(row["status"], "erreur"),
         reason=row.get("verdict") or row.get("detail") or row["status"],
         detail=row.get("detail") or "",
@@ -55,8 +66,8 @@ def _item(row: dict[str, Any]) -> BotDecisionOut:
 @router.get("/decisions", response_model=BotDecisionsOut, summary="Journal des décisions et rejets")
 def bot_decisions(
     limit: int = Query(50, ge=1, le=MAX_DECISIONS, description="Nombre de décisions (les plus récentes)"),
-    status: Literal["accepted", "rejected"] | None = Query(None, description="accepted = ordres validés, "
-                                                                               "rejected = signaux refusés"),
+    status: Literal["accepted", "rejected", "actions"] | None = Query(
+        None, description="accepted = ordres validés, rejected = signaux refusés, actions = gestion et sécurité"),
     symbol: str | None = Query(None, max_length=32),
     engine: TradingEngine = Depends(get_engine),
 ) -> BotDecisionsOut:
@@ -65,7 +76,8 @@ def bot_decisions(
     ACCEPTÉ / REJETÉ, étape (signal, calendrier, cooldown, risque, broker) et motif précis
     (ex : « Score hybride +0.42 sous le seuil de ±0.60 », « Risque : spread 40 pts > maximum 30 pts »).
     """
-    statuses = {"accepted": ACCEPTED_STATUSES, "rejected": REJECTED_STATUSES}.get(status or "")
+    statuses = {"accepted": ACCEPTED_STATUSES, "rejected": REJECTED_STATUSES,
+                "actions": ACTION_STATUSES}.get(status or "")
     symbol = symbol.strip().upper() if symbol else None
     db = get_database()
     if db.available:
@@ -77,4 +89,6 @@ def bot_decisions(
         source = "memory"
     items = [_item(r) for r in rows]
     accepted = sum(i.status == "ACCEPTÉ" for i in items)
-    return BotDecisionsOut(source=source, accepted=accepted, rejected=len(items) - accepted, items=items)
+    actions = sum(i.status == "ACTION" for i in items)
+    return BotDecisionsOut(source=source, accepted=accepted, rejected=len(items) - accepted - actions,
+                           actions=actions, items=items)

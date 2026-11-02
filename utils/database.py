@@ -33,7 +33,7 @@ from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 500
 MEMORY = ":memory:"
@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS trade_decisions (
     dry_run         INTEGER,
     detail          TEXT    NOT NULL DEFAULT '',
     direction       TEXT,                      -- BUY / SELL envisagé, même si refusé
-    verdict         TEXT    NOT NULL DEFAULT '' -- motif principal, court et chiffré
+    verdict         TEXT    NOT NULL DEFAULT '', -- motif principal, court et chiffré
+    mode            TEXT                        -- scalping / day / swing (profil adaptive)
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_time ON trade_decisions (decided_at);
 CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON trade_decisions (symbol, decided_at);
@@ -98,9 +99,9 @@ WEBHOOK_COLUMNS = ("received_at", "source", "symbol", "action", "accepted", "rea
 ARTICLE_COLUMNS = ("link", "title", "source", "published_at", "snippet", "score", "label", "keywords", "symbols")
 DECISION_COLUMNS = ("decided_at", "cycle", "symbol", "status", "action", "confidence", "technical_score",
                     "sentiment_score", "hybrid_score", "entry_price", "sl", "tp", "volume", "ticket", "dry_run", "detail",
-                    "direction", "verdict")
+                    "direction", "verdict", "mode")
 # Colonnes ajoutées après la première version : ajoutées aux bases existantes à l'ouverture
-MIGRATIONS = {"trade_decisions": (("direction", "TEXT"), ("verdict", "TEXT NOT NULL DEFAULT ''"))}
+MIGRATIONS = {"trade_decisions": (("direction", "TEXT"), ("verdict", "TEXT NOT NULL DEFAULT ''"), ("mode", "TEXT"))}
 PURGE_TABLES = {"webhooks_log": "received_at", "market_sentiment": "last_seen_at", "trade_decisions": "decided_at"}
 
 

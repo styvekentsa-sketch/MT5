@@ -13,6 +13,7 @@ Le bot, la base, les news et le dashboard gardent les noms canoniques (EURUSD).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 import pandas as pd
@@ -21,6 +22,7 @@ from brokers import mt5_client
 from brokers.base import BaseBroker
 from brokers.errors import BrokerConnectionError
 from brokers.models import AccountInfo, ClosedDeal, OrderResult, Position, SymbolSpecs, Tick
+from models.schemas import SymbolDiagnostic
 from config import settings
 from utils.logger import get_logger
 
@@ -37,9 +39,33 @@ class MT5Broker(BaseBroker):
         super().__init__()
         self.symbol_suffix = settings.broker.mt5_symbol_suffix if symbol_suffix is None else symbol_suffix
 
+    supports_account_switch = True
+
     @property
+    @property
+    def bar_timezone(self):
+        from utils.server_time import mt5_server_timezone
+
+        return mt5_server_timezone()
+
     def description(self) -> str:
-        return f"MT5 {settings.mt5.account} @ {settings.mt5.server}"
+        creds = mt5_client.active_credentials()
+        return f"MT5 {creds.login} @ {creds.server}"
+
+    def switch_account(self, login: int, password: str, server: str) -> tuple[bool, str]:
+        ok, message = mt5_client.switch_account(login, password, server)
+        if not ok:
+            self._report("connexion au compte", message)
+        return ok, message
+
+    def reset_account(self) -> tuple[bool, str]:
+        return mt5_client.reset_account()
+
+    def is_dashboard_session(self) -> bool:
+        return mt5_client.is_dashboard_session()
+
+    def trading_enabled(self) -> bool | None:
+        return mt5_client.terminal_trade_allowed()
 
     # ------------------------------------------------------------------ symboles
 
@@ -101,6 +127,21 @@ class MT5Broker(BaseBroker):
         result = mt5_client.close_position(ticket, comment=comment, force=force)
         if not result.success:
             self._report(f"clôture #{ticket}", result.message)
+        return result
+
+    def diagnose_symbol(self, symbol: str, entry: float | None = None,
+                        sl: float | None = None) -> SymbolDiagnostic | None:
+        diagnostic = mt5_client.diagnose_symbol(self.to_broker_symbol(symbol), entry, sl)
+        return diagnostic.model_copy(update={"symbol": symbol})
+
+    def get_position_deals(self, position_id: int) -> list[ClosedDeal]:
+        deals = mt5_client.get_position_deals(position_id)
+        return [replace(d, symbol=self.to_bot_symbol(d.symbol)) for d in deals]
+
+    def modify_stops(self, ticket: int, sl: float | None, tp: float | None) -> OrderResult:
+        result = mt5_client.modify_position_stops(ticket, sl, tp)
+        if not result.success:
+            self._report(f"modification SL/TP #{ticket}", result.message)
         return result
 
     # ------------------------------------------------------------------ marché

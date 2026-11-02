@@ -29,8 +29,10 @@ os.environ.update({
     "TRADING_SYMBOLS": "EURUSD,XAUUSD",
     "TRADING_TIMEFRAME": "M15",
     "STRATEGY_PROFILE": "standard",                     # indépendant du profil choisi dans le .env
+    "LEARNING_ENABLED": "false",                       # mémoire des erreurs : activée test par test (tmp_path)
     "NEWS_RSS_FEEDS": "",
     "NEWS_DEFAULT_FEEDS": "false",                     # aucun accès réseau pendant les tests
+    "NEWS_CALENDAR_PROVIDER": "simulated",             # calendrier vide sans réseau (tests : fournisseur injecté)
     "SENTIMENT_ENGINE": "vader",
     "API_ENABLED": "false",
     "API_KEY": TEST_API_KEY,
@@ -77,3 +79,21 @@ def fake_calc_profit(side: str, symbol: str, volume: float, price_open: float, p
     """Équivalent de mt5.order_calc_profit pour EURUSD (tick 0.00001 = 1.0 par lot)."""
     diff = price_close - price_open if side == "BUY" else price_open - price_close
     return diff / 0.00001 * 1.0 * volume
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_verifier: le vérificateur indépendant n'est pas court-circuité")
+
+
+@pytest.fixture(autouse=True)
+def _approving_verifier(request, monkeypatch):
+    """
+    Les tests du moteur simulent le pipeline (prix, risque) : le vérificateur indépendant y est
+    court-circuité. Les tests qui l'éprouvent portent le marqueur `real_verifier`.
+    """
+    if "real_verifier" in request.keywords:
+        return
+    from core import engine
+    from risk.verifier import Verdict
+
+    monkeypatch.setattr(engine, "verify_order", lambda *args, **kwargs: Verdict(True))

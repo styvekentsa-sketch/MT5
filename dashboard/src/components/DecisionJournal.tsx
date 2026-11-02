@@ -4,7 +4,7 @@ import type { BotDecision, BotDecisions } from "../api/types";
 import { formatTime, signColor } from "../lib/format";
 import { GlassCard, Skeleton } from "./ui/GlassCard";
 
-export type DecisionFilter = "all" | "accepted" | "rejected";
+export type DecisionFilter = "all" | "accepted" | "rejected" | "actions";
 
 interface DecisionJournalProps {
   journal: BotDecisions | null;
@@ -17,7 +17,14 @@ const FILTERS: { id: DecisionFilter; label: string }[] = [
   { id: "all", label: "Tout" },
   { id: "accepted", label: "Acceptés" },
   { id: "rejected", label: "Rejetés" },
+  { id: "actions", label: "Actions" },
 ];
+
+const MODE_STYLES: Record<NonNullable<BotDecision["mode"]>, { label: string; className: string }> = {
+  scalping: { label: "Scalping", className: "border-sky-500/40 text-sky-300" },
+  day: { label: "Day", className: "border-violet-500/40 text-violet-300" },
+  swing: { label: "Swing", className: "border-amber-500/40 text-amber-300" },
+};
 
 const STAGE_LABELS: Record<BotDecision["stage"], string> = {
   signal: "Signal",
@@ -27,6 +34,10 @@ const STAGE_LABELS: Record<BotDecision["stage"], string> = {
   broker: "Broker",
   exécution: "Exécution",
   erreur: "Erreur",
+  gestion: "Gestion",
+  sécurité: "Sécurité",
+  mémoire: "Mémoire",
+  "post-mortem": "Post-mortem",
 };
 
 function Badge({ className, children }: { className: string; children: ReactNode }) {
@@ -47,11 +58,18 @@ function ActionBadge({ action }: { action: BotDecision["action"] }) {
 }
 
 function StatusBadge({ status }: { status: BotDecision["status"] }) {
+  if (status === "ACTION") return <Badge className="border-amber-500/50 bg-amber-500/15 text-amber-300">Action</Badge>;
   return status === "ACCEPTÉ" ? (
     <Badge className="border-emerald-500/50 bg-emerald-500/15 text-emerald-300">Accepté</Badge>
   ) : (
     <Badge className="border-rose-500/50 bg-rose-500/15 text-rose-300">Rejeté</Badge>
   );
+}
+
+function ModeBadge({ mode }: { mode: BotDecision["mode"] }) {
+  if (!mode) return null;
+  const style = MODE_STYLES[mode];
+  return <Badge className={style.className}>{style.label}</Badge>;
 }
 
 /** Scores de la décision, affichés au survol avec l'explication complète. */
@@ -69,6 +87,7 @@ function DecisionRow({ d }: { d: BotDecision }) {
     <li className="px-4 py-3 transition hover:bg-surface-2 sm:px-5" title={tooltip(d)}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
         <span className="w-16 shrink-0 text-sm font-semibold text-slate-100">{d.symbol}</span>
+        <ModeBadge mode={d.mode} />
         <ActionBadge action={d.action} />
         <StatusBadge status={d.status} />
         <span className="text-[11px] text-slate-500">{STAGE_LABELS[d.stage]}</span>
@@ -76,7 +95,7 @@ function DecisionRow({ d }: { d: BotDecision }) {
           {Number.isNaN(time.getTime()) ? "—" : time.toLocaleTimeString("fr-FR")}
         </span>
       </div>
-      <p className={`mt-1.5 line-clamp-2 text-xs leading-relaxed break-words sm:text-sm ${d.status === "REJETÉ" ? "text-slate-300" : "text-emerald-200"}`}>
+      <p className={`mt-1.5 line-clamp-2 text-xs leading-relaxed break-words sm:text-sm ${d.status === "REJETÉ" ? "text-slate-300" : d.status === "ACTION" ? "text-amber-200" : "text-emerald-200"}`}>
         {d.reason}
       </p>
       {d.hybrid_score !== null && (
@@ -139,6 +158,12 @@ export function DecisionJournal({ journal, filter, onFilterChange, lastUpdated }
           <span className="font-mono text-[11px] text-slate-500 tabular-nums">
             <span className="text-emerald-300">{journal.accepted}</span> acceptée(s) ·{" "}
             <span className="text-rose-300">{journal.rejected}</span> rejetée(s)
+            {(journal.actions ?? 0) > 0 && (
+              <>
+                {" · "}
+                <span className="text-amber-300">{journal.actions}</span> action(s)
+              </>
+            )}
             {journal.source === "memory" && " · mémoire"}
           </span>
         )}

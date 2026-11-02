@@ -1,12 +1,13 @@
-import { CandlestickChart, DatabaseZap, ListChecks, Newspaper, Wallet } from "lucide-react";
+import { CandlestickChart, Crosshair, DatabaseZap, ListChecks, Newspaper, Wallet } from "lucide-react";
 
-export type Tab = "account" | "positions" | "news" | "engine" | "data";
+export type Tab = "account" | "positions" | "news" | "engine" | "analysis" | "data";
 
 const TABS: { id: Tab; label: string; Icon: typeof Wallet }[] = [
   { id: "account", label: "Compte", Icon: Wallet },
   { id: "positions", label: "Positions", Icon: CandlestickChart },
   { id: "news", label: "Actualités", Icon: Newspaper },
   { id: "engine", label: "Moteur", Icon: ListChecks },
+  { id: "analysis", label: "Analyse", Icon: Crosshair },
   { id: "data", label: "Données", Icon: DatabaseZap },
 ];
 
@@ -23,7 +24,7 @@ export function MobileNav({ active, positionCount, onChange }: MobileNavProps) {
       className="pb-safe fixed inset-x-0 bottom-0 z-40 border-t border-line bg-canvas/95 md:hidden"
       aria-label="Navigation principale"
     >
-      <ul className="mx-auto grid max-w-lg grid-cols-5">
+      <ul className="mx-auto grid max-w-lg grid-cols-6">
         {TABS.map(({ id, label, Icon }) => {
           const selected = id === active;
           return (

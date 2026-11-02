@@ -1,6 +1,8 @@
 import { Landmark, PiggyBank, Scale, TrendingDown, TrendingUp } from "lucide-react";
 import type { ReactNode } from "react";
-import type { Account, AccountType } from "../api/types";
+import { LogIn, LogOut, TriangleAlert } from "lucide-react";
+import type { Account, AccountType, MT5Session } from "../api/types";
+import { Button } from "./ui/Button";
 import { formatMoney, formatNumber, formatPct, signColor } from "../lib/format";
 import { Skeleton } from "./ui/GlassCard";
 
@@ -48,8 +50,15 @@ function Tag({ children, className = "border-line-strong text-slate-300" }: { ch
  * Identité du compte connecté : titulaire (ou « Compte démo #login »), broker / exchange,
  * serveur, numéro de compte, type (réel / démo / paper) et état de la connexion.
  */
-function AccountIdentity({ account, connected }: { account: Account; connected: boolean | null }) {
+interface SessionActions {
+  session?: MT5Session | null;
+  onLogin?: () => void;
+  onLogout?: () => void;
+}
+
+function AccountIdentity({ account, connected, session, onLogin, onLogout }: { account: Account; connected: boolean | null } & SessionActions) {
   const isMt5 = !account.broker || account.broker === "mt5";
+  const isSim = account.broker === "sim";
   const title = account.display_name || account.name || (account.login ? `Compte #${account.login}` : "Compte");
   const details = [account.company, account.server, account.login ? `#${account.login}` : null].filter(Boolean);
   const type = ACCOUNT_TYPES[account.account_type ?? "unknown"];
@@ -66,7 +75,7 @@ function AccountIdentity({ account, connected }: { account: Account; connected: 
         <div className="flex items-center gap-2.5">
           <span
             className={`inline-flex shrink-0 items-center gap-1.5 text-xs font-medium tracking-[0.08em] uppercase ${link.text}`}
-            title={isMt5 ? "Connexion du terminal MetaTrader 5 au serveur du broker" : "Connexion à l'exchange"}
+            title={isMt5 ? "Connexion du terminal MetaTrader 5 au serveur du broker" : isSim ? "Broker simulé" : "Connexion à l'exchange"}
           >
             <span className="relative flex size-2">
               {connected && <span className={`absolute inline-flex size-full animate-ping rounded-full opacity-60 ${link.dot}`} />}
@@ -76,7 +85,7 @@ function AccountIdentity({ account, connected }: { account: Account; connected: 
           </span>
           <span className="h-3 w-px bg-line-strong" aria-hidden />
           <span className="text-xs font-medium tracking-[0.08em] text-slate-500 uppercase">
-            {isMt5 ? "MetaTrader 5" : `${account.broker} · ccxt`}
+            {isMt5 ? "MetaTrader 5" : isSim ? "Simulation" : `${account.broker} · ccxt`}
           </span>
         </div>
         <h2 className="mt-1.5 truncate text-lg font-semibold text-white sm:text-xl" title={title}>
@@ -88,23 +97,47 @@ function AccountIdentity({ account, connected }: { account: Account; connected: 
           </p>
         )}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-        {type && <Tag className={type.className}>{type.label}</Tag>}
-        {account.market && <Tag>{account.market === "crypto" ? "Crypto" : "Forex / CFD"}</Tag>}
-        <Tag>{account.currency} · 1:{account.leverage}</Tag>
+      <div className="flex shrink-0 flex-col gap-2 sm:items-end">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {isSim && <Tag className="border-amber-500/60 bg-amber-500/15 text-amber-300">Simulation · données fictives</Tag>}
+          {session?.source === "dashboard" && <Tag className="border-sky-500/40 bg-sky-500/10 text-sky-300">Session web</Tag>}
+          {type && <Tag className={type.className}>{type.label}</Tag>}
+          {account.market && <Tag>{account.market === "crypto" ? "Crypto" : "Forex / CFD"}</Tag>}
+          <Tag>{account.currency} · 1:{account.leverage}</Tag>
+        </div>
+        {isMt5 && (onLogin || onLogout) && (
+          <div className="flex flex-wrap gap-2">
+            {onLogin && (
+              <Button size="sm" onClick={onLogin} icon={<LogIn className="size-3.5" />}>
+                Changer de compte
+              </Button>
+            )}
+            {onLogout && session?.source === "dashboard" && (
+              <Button size="sm" variant="warning" onClick={onLogout} icon={<LogOut className="size-3.5" />}>
+                Déconnexion
+              </Button>
+            )}
+          </div>
+        )}
+        {isMt5 && session?.algo_trading === false && (
+          <p className="flex items-center gap-1.5 text-[11px] text-amber-300">
+            <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+            Algo Trading désactivé dans MT5 : les ordres LIVE seront refusés
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
-interface AccountOverviewProps {
+interface AccountOverviewProps extends SessionActions {
   account: Account | null;
   /** Connexion au broker (MT5 ou exchange) ; null si inconnue */
   connected?: boolean | null;
 }
 
 /** Identité du compte et cartes financières : solde, fonds propres, marge libre, P/L du jour. */
-export function AccountOverview({ account, connected = null }: AccountOverviewProps) {
+export function AccountOverview({ account, connected = null, session, onLogin, onLogout }: AccountOverviewProps) {
   if (!account) {
     return (
       <div className="flex flex-col gap-4 lg:gap-6">
@@ -132,7 +165,7 @@ export function AccountOverview({ account, connected = null }: AccountOverviewPr
 
   return (
     <div className="flex flex-col gap-4 lg:gap-6">
-      <AccountIdentity account={account} connected={connected} />
+      <AccountIdentity account={account} connected={connected} session={session} onLogin={onLogin} onLogout={onLogout} />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:gap-6 xl:grid-cols-4">
         <MetricCard
           label="Solde"

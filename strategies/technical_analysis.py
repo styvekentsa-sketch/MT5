@@ -82,6 +82,7 @@ INDICATOR_PROFILES = {
                                 atr_window=7, swing_lookback=10),
 }
 INDICATOR_PROFILES["micro"] = INDICATOR_PROFILES["scalping"]       # mêmes indicateurs rapides, sans seuil
+INDICATOR_PROFILES["adaptive"] = INDICATOR_PROFILES["scalping"]    # mode scalping ; day / swing : strategies.regime
 
 
 def active_params() -> IndicatorParams:
@@ -219,7 +220,8 @@ def _rsi_component(rsi: float) -> tuple[float, str]:
 #  Signal technique
 # =============================================================================
 
-def signal_from_indicators(ind: pd.DataFrame, pos: int = -1, params: IndicatorParams | None = None) -> TechnicalSignal:
+def signal_from_indicators(ind: pd.DataFrame, pos: int = -1, params: IndicatorParams | None = None,
+                           threshold: float | None = None) -> TechnicalSignal:
     """
     Signal technique à la bougie clôturée `pos` d'un DataFrame déjà enrichi par
     `compute_indicators`. Ne lit que les lignes <= `pos` (aucune donnée future) :
@@ -227,7 +229,7 @@ def signal_from_indicators(ind: pd.DataFrame, pos: int = -1, params: IndicatorPa
     bougie par bougie, avec exactement la même notation que le bot en direct.
     """
     p = params or active_params()
-    threshold = settings.strategy.technical_threshold
+    threshold = settings.strategy.technical_threshold if threshold is None else threshold
     try:
         pos = pos if pos >= 0 else len(ind) + pos
         if pos < 1 or pos >= len(ind):

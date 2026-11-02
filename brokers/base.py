@@ -31,6 +31,7 @@ import pandas as pd
 
 from brokers.errors import BrokerConnectionError, record_error
 from brokers.models import AccountInfo, ClosedDeal, Market, OrderResult, Position, SymbolSpecs, Tick
+from models.schemas import SymbolDiagnostic
 from config import settings
 from utils.logger import get_logger
 from utils.notifier import Level, notify
@@ -84,6 +85,8 @@ class BaseBroker(ABC):
     name: str = "broker"
     #: Type de marché : détermine les unités (lots / contrats) et certaines règles de risque
     market: Market = "forex"
+    #: Fuseau des étiquettes de bougies (None : UTC réel ; MT5 : heure du serveur, cf. utils/server_time.py)
+    bar_timezone = None
 
     def __init__(self) -> None:
         self._connected_state: bool | None = None       # None = jamais connecté
@@ -139,6 +142,40 @@ class BaseBroker(ABC):
     @abstractmethod
     def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
         """Ferme une position. `force=True` : clôture réelle même en PAPER (kill-switch)."""
+
+    def diagnose_symbol(self, symbol: str, entry: float | None = None,
+                        sl: float | None = None) -> SymbolDiagnostic | None:
+        """Contrat, cotation et verdict de tradabilité du symbole ; None si la plateforme ne le fournit pas."""
+        return None
+
+    def get_position_deals(self, position_id: int) -> list[ClosedDeal]:
+        """Transactions d'une position (ouverture et clôture) ; vide si le broker ne les fournit pas."""
+        return []
+
+    # ------------------------------------------------------------------ compte actif (connexion depuis le dashboard)
+
+    supports_account_switch = False
+
+    def switch_account(self, login: int, password: str, server: str) -> tuple[bool, str]:
+        """Connecte la plateforme à un autre compte ; retourne (succès, message lisible)."""
+        return False, f"Changement de compte non pris en charge par {self.name}"
+
+    def reset_account(self) -> tuple[bool, str]:
+        """Retour au compte configuré dans le .env."""
+        return False, f"Changement de compte non pris en charge par {self.name}"
+
+    def is_dashboard_session(self) -> bool:
+        """True si le compte actif a été choisi depuis le dashboard (et non dans le .env)."""
+        return False
+
+    def trading_enabled(self) -> bool | None:
+        """Autorisation du trading automatique côté plateforme (Algo Trading MT5) ; None si inconnue."""
+        return None
+
+    def modify_stops(self, ticket: int, sl: float | None, tp: float | None) -> OrderResult:
+        """Déplace le SL / TP d'une position ouverte (trailing stop). Non pris en charge par défaut."""
+        return OrderResult(False, "", "MODIFY", 0.0, sl=sl, tp=tp, ticket=ticket,
+                           message=f"modification des stops non prise en charge par {self.name}")
 
     # ------------------------------------------------------------------ marché
 

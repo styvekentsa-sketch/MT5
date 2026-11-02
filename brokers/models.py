@@ -103,6 +103,11 @@ class ClosedDeal:
     time: datetime
     net_profit: float                # profit + commission + swap + frais
     magic: int
+    position_id: int = 0             # position concernée (= ticket de l'ordre d'ouverture chez MT5)
+    price: float = 0.0
+    reason: str = ""                 # sl, tp, stop_out, bot, manuel...
+    entry: str = "out"               # in (ouverture) / out (clôture)
+    volume: float = 0.0
 
 
 @dataclass(frozen=True)

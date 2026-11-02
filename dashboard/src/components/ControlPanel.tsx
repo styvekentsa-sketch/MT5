@@ -135,6 +135,11 @@ export function ControlPanel({
                 Compte : {accountLabel}
               </span>
             )}
+            {apiConnected && status?.broker === "sim" && (
+              <span className="inline-flex items-center rounded border border-amber-500/60 bg-amber-500/15 px-2.5 py-1 font-mono text-xs font-medium text-amber-300">
+                SIMULATION
+              </span>
+            )}
             <ModePill mode={apiConnected ? status?.mode : undefined} />
             {status && (
               <span className="hidden items-center gap-1.5 text-xs text-slate-400 sm:inline-flex">

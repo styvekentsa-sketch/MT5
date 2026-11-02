@@ -199,9 +199,10 @@ def test_signal_matches_live_technical_signal():
 def test_calendar_blocker_window():
     event = EconomicEvent("NFP", "USD", T0 + timedelta(hours=1), "High")
     blocked = calendar_blocker([event, EconomicEvent("Low", "USD", T0, "Low")])
-    assert blocked("EURUSD", T0 + timedelta(minutes=50)) is True             # 10 min avant
-    assert blocked("EURUSD", T0 + timedelta(minutes=64)) is True             # 4 min après
-    assert blocked("EURUSD", T0 + timedelta(minutes=30)) is False
+    assert blocked("EURUSD", T0 + timedelta(minutes=31)) is True             # 29 min avant (fenêtre : 30 min)
+    assert blocked("EURUSD", T0 + timedelta(minutes=74)) is True             # 14 min après (fenêtre : 15 min)
+    assert blocked("EURUSD", T0 + timedelta(minutes=76)) is False            # 16 min après
+    assert blocked("EURUSD", T0 + timedelta(minutes=25)) is False            # 35 min avant
     assert blocked("EURUSD", T0) is False                                    # impact faible ignoré
     assert blocked("GBPJPY", T0 + timedelta(minutes=55)) is False
 
@@ -274,3 +275,187 @@ def test_runner_end_to_end(tmp_path, capsys):
     assert report["symbol"] == "EURUSD" and "max_drawdown_pct" in report["metrics"]
     assert (out / "trades.csv").exists() and (out / "equity.csv").exists()
     assert runner.main(["--symbol", "EURUSD", "--csv", str(tmp_path / "absent.csv")]) == 1
+
+
+# =============================================================================
+#  Backtest des stratégies à setups (backtesting/setup_engine.py)
+# =============================================================================
+
+from backtesting.setup_engine import (  # noqa: E402
+    CostModel,
+    SetupBacktester,
+    SetupTrade,
+    compute_stats,
+    segment,
+    visible,
+)
+from core.news_pipeline import CalendarEvent, Importance  # noqa: E402
+from models.schemas import MarketRegime, SetupStatus  # noqa: E402
+from strategies.base import BaseStrategy, BuyPlan  # noqa: E402
+
+
+def _m15(n=600, seed=1, drift=0.00004, vol=0.0006) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    closes = 1.10 + np.cumsum(rng.normal(drift, vol, n))
+    df = _candles(closes, wick=0.0004)
+    df["spread"] = 10
+    return df
+
+
+def _h1(m15: pd.DataFrame) -> pd.DataFrame:
+    """H1 cohérent avec les M15 (agrégation) : même marché sur les deux timeframes."""
+    return m15.resample("1h").agg({"open": "first", "high": "max", "low": "min", "close": "last"}).dropna()
+
+
+class Breakout(BaseStrategy):
+    """Stratégie jouet : achat sur cassure du plus haut des 4 bougies précédentes, SL 20 pips, TP 70 pips."""
+    name = "cassure"
+    timeframes = ("M15", "H1")
+    bars = 60
+
+    def __init__(self, journal=None):
+        self.journal = journal if journal is not None else []
+
+    def plan_buy(self, data, quote):
+        m15, h1 = data["M15"], data["H1"]
+        if len(m15) < 6 or len(h1) < 2 or quote is None:
+            return None
+        if m15["close"].iloc[-1] <= m15["high"].iloc[-5:-1].max():
+            return None
+        entry = quote.ask
+        return BuyPlan(SetupStatus.READY, entry, entry - 0.0020, entry + 0.0070, 3.4, MarketRegime.TREND_UP,
+                       "cassure du plus haut de 4 bougies")
+
+    def find_setup(self, symbol, data, now, quote=None):
+        setup = super().find_setup(symbol, data, now, quote)
+        self.journal.append((now, {tf: (df.index[-1] if len(df) else None) for tf, df in data.items()},
+                             None if setup is None else (setup.status, setup.side, round(setup.entry_price, 6))))
+        return setup
+
+
+def _run(strategy=None, m15=None, costs=CostModel(slippage_points=0), calendar=()):
+    m15 = _m15() if m15 is None else m15
+    return SetupBacktester([strategy or Breakout()], "EURUSD", {"M15": m15, "H1": _h1(m15)}, EURUSD,
+                           costs=costs, calendar=calendar).run()
+
+
+def test_strategies_only_see_closed_candles():
+    spy = Breakout()
+    _run(spy)
+    assert len(spy.journal) > 100
+    for now, last_bars, _ in spy.journal:
+        assert last_bars["M15"] + pd.Timedelta(minutes=15) <= now          # bougie M15 clôturée
+        if last_bars["H1"] is not None:
+            assert last_bars["H1"] + pd.Timedelta(hours=1) <= now          # H1 visible seulement une fois fermée
+
+
+def test_visible_excludes_the_forming_candle():
+    m15 = _m15(n=20)
+    at = m15.index[10] + pd.Timedelta(minutes=14, seconds=59)              # bougie 10 encore ouverte
+    assert visible(m15, "M15", at, 100).index[-1] == m15.index[9]
+    assert visible(m15, "M15", at + pd.Timedelta(seconds=1), 100).index[-1] == m15.index[10]
+    assert len(visible(m15, "M15", m15.index[-1] + pd.Timedelta(hours=1), 5)) == 5
+
+
+def test_decisions_are_unchanged_when_the_future_is_poisoned():
+    """Remplacer tout ce qui suit une date par des prix absurdes ne change aucune décision antérieure."""
+    m15 = _m15()
+    cutoff = m15.index[400]
+    poisoned = m15.copy()
+    poisoned.loc[poisoned.index >= cutoff, ["open", "high", "low", "close"]] *= 1.5
+    clean, dirty = Breakout(), Breakout()
+    _run(clean, m15)
+    _run(dirty, poisoned)
+    before = lambda journal: [entry for entry in journal if entry[0] <= cutoff]  # noqa: E731
+    assert before(clean.journal) == before(dirty.journal) and len(before(clean.journal)) > 300
+
+
+def test_orders_execute_after_the_signal_at_the_next_open():
+    m15 = _m15()
+    result = _run(m15=m15)
+    assert result.trades
+    for trade in result.trades:
+        assert trade.entry_time >= trade.signal_time                        # jamais sur une bougie antérieure
+        bar = m15.loc[trade.entry_time]                                     # bougie suivant le signal
+        assert trade.entry_time == trade.signal_time
+        expected = bar["open"] + 10 * EURUSD.point if trade.side == "BUY" else bar["open"]   # Ask / Bid
+        assert trade.entry_price == pytest.approx(expected)
+
+
+def test_slippage_and_spread_reduce_results():
+    without = _run(costs=CostModel(spread_points=10, slippage_points=0))
+    with_slippage = _run(costs=CostModel(spread_points=10, slippage_points=5))
+    first_a, first_b = without.trades[0], with_slippage.trades[0]
+    assert first_b.entry_price == pytest.approx(first_a.entry_price + 5 * EURUSD.point)
+    assert with_slippage.stats.net_profit < without.stats.net_profit
+
+
+def test_same_candle_sl_and_tp_is_conservative_and_flagged():
+    broker = SimulatedBroker(EURUSD, 10_000, slippage_points=0)
+    broker.set_market(T0, 1.1000, 0)
+    broker.open_position("BUY", 1.0, sl=1.0980, tp=1.1020)
+    [trade] = broker.process_bar(T0 + timedelta(minutes=15), 1.1000, 1.1030, 1.0970, 0)   # touche les deux
+    assert trade.exit_reason == "sl" and trade.ambiguous and trade.exit_price == pytest.approx(1.0980)
+
+
+def test_expired_setups_are_not_executed():
+    class Stale(Breakout):
+        validity_bars = -1                                                   # expiré avant l'exécution
+    result = _run(Stale())
+    assert result.trades == [] and result.decisions["cassure:expiré à l'exécution"] > 0
+
+
+def test_news_window_blocks_entries_with_schedule_only():
+    m15 = _m15()
+    baseline = _run(m15=m15)
+    signal = baseline.trades[0].signal_time
+    event = CalendarEvent(time=signal + timedelta(minutes=10), source="test", title="NFP", currency="USD",
+                          importance=Importance.HIGH, consensus="180K", actual="400K")
+    blocked = _run(m15=m15, calendar=[event])
+    window = lambda trade: event.time - timedelta(minutes=30) <= trade.signal_time <= event.time + timedelta(minutes=15)  # noqa: E731
+    assert any(window(t) for t in baseline.trades)
+    assert not any(window(t) for t in blocked.trades)                      # aucune entrée dans la fenêtre
+
+
+def _setup_trade(profit, risk=50.0, **changes):
+    values = dict(strategy="a", symbol="EURUSD", side="BUY", style="day", regime="range", setup_id="x",
+                  signal_time=T0, entry_time=T0, exit_time=T0, entry_price=1.1, exit_price=1.1, stop_loss=1.09,
+                  take_profit=1.13, volume=0.1, exit_reason="sl" if profit < 0 else "tp", ambiguous=False,
+                  profit=profit, planned_risk=risk, planned_net_ratio=3.0)
+    return SetupTrade(**{**values, **changes})
+
+
+def test_expectancy_drawdown_and_streak_are_consistent():
+    trades = [_setup_trade(p) for p in (100, -50, -50, -50, 200)]
+    stats = compute_stats(trades)
+    assert stats.expectancy == pytest.approx(30.0) and stats.expectancy_r == pytest.approx(0.6)
+    assert (stats.win_rate_pct, stats.max_losing_streak, stats.max_drawdown) == (40.0, 3, 150.0)
+    assert stats.profit_factor == pytest.approx(2.0) and stats.avg_win == 150 and stats.avg_loss == 50
+    assert compute_stats([]).trades == 0
+
+
+def test_segmentation_by_strategy_asset_horizon_regime():
+    trades = [_setup_trade(100, strategy="pullback", regime="tendance_haussière"),
+              _setup_trade(-50, strategy="range_rejet", symbol="XAUUSD", style="day"),
+              _setup_trade(-50, strategy="pullback", style="swing", side="SELL")]
+    segments = segment(trades)
+    assert segments["stratégie"]["pullback"].net_profit == 50 and segments["stratégie"]["range_rejet"].trades == 1
+    assert set(segments["actif"]) == {"EURUSD", "XAUUSD"} and set(segments["horizon"]) == {"day", "swing"}
+    assert segments["régime"]["tendance_haussière"].wins == 1 and set(segments["sens"]) == {"BUY", "SELL"}
+
+
+def test_engine_equity_matches_closed_trades():
+    result = _run()
+    assert result.trades and result.equity.iloc[-1] == pytest.approx(10_000 + result.stats.net_profit, abs=0.05)
+    assert result.equity_drawdown >= 0 and "Trades" in result.summary()
+
+
+def test_real_strategies_run_on_simulated_history():
+    from strategies.pullback import PullbackStrategy
+    from strategies.range_rejection import RangeRejectionStrategy
+    m15 = _m15(n=900, seed=5, drift=0.00002)
+    result = SetupBacktester([PullbackStrategy(), RangeRejectionStrategy()], "EURUSD", {"M15": m15, "H1": _h1(m15)},
+                             EURUSD).run()
+    assert isinstance(result.stats.trades, int)
+    for trade in result.trades:
+        assert trade.entry_time >= trade.signal_time and trade.planned_net_ratio >= 3 - 1e-6

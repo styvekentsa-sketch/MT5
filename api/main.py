@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import bot, control, history, market, monitoring, webhooks
+from api.routes import analysis, auth, bot, control, history, learning, market, monitoring, webhooks
 from brokers.errors import BrokerConnectionError
 from config.settings import settings
 from core.engine import TradingEngine
@@ -69,8 +69,11 @@ def create_app(engine: TradingEngine | None = None) -> FastAPI:
     app.include_router(monitoring.router)
     app.include_router(control.router)
     app.include_router(history.router)
+    app.include_router(auth.router)
     app.include_router(bot.router)
+    app.include_router(learning.router)
     app.include_router(market.router)
+    app.include_router(analysis.router)
     app.include_router(webhooks.journal)
     app.include_router(webhooks.receiver)
 

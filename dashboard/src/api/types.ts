@@ -242,7 +242,21 @@ export interface AccountsList {
 
 // --- Journal des décisions et rejets (GET /api/bot/decisions) ---
 
-export type DecisionStage = "signal" | "calendrier" | "cooldown" | "risque" | "broker" | "exécution" | "erreur";
+export type DecisionStage =
+  | "signal"
+  | "calendrier"
+  | "cooldown"
+  | "risque"
+  | "broker"
+  | "exécution"
+  | "erreur"
+  | "gestion"
+  | "sécurité"
+  | "mémoire"
+  | "post-mortem";
+
+/** Style choisi par le profil adaptive */
+export type TradingMode = "scalping" | "day" | "swing";
 
 export interface BotDecision {
   id: number;
@@ -252,8 +266,10 @@ export interface BotDecision {
   symbol: string;
   /** Sens envisagé, même si le trade est refusé ; null si aucun signal */
   action: "ACHAT" | "VENTE" | null;
-  status: "ACCEPTÉ" | "REJETÉ";
+  /** ACTION : gestion d'une position (trailing, fin de session) ou coupure de sécurité */
+  status: "ACCEPTÉ" | "REJETÉ" | "ACTION";
   stage: DecisionStage;
+  mode?: TradingMode | null;
   /** Motif précis et chiffré */
   reason: string;
   /** Explication complète (technique, sentiment, filtres) */
@@ -271,5 +287,215 @@ export interface BotDecisions {
   source: "sqlite" | "memory";
   accepted: number;
   rejected: number;
+  actions?: number;
   items: BotDecision[];
+}
+
+// --- Apprentissage : journal des trades, post-mortem, mémoire des erreurs (GET /api/learning) ---
+
+export interface LearningTrade {
+  id: number;
+  timestamp: string;
+  ticket: number;
+  symbol: string;
+  side: "BUY" | "SELL";
+  volume: number;
+  entry_price: number;
+  sl: number | null;
+  tp: number | null;
+  mode: TradingMode | null;
+  reason: string;
+  features: Record<string, number | string | null>;
+  pattern: string;
+  status: "open" | "simulated" | "closed";
+  net_profit?: number;
+  close_reason?: string;
+  duration_seconds?: number | null;
+}
+
+export interface LossAnalysis {
+  id: number;
+  analyzed_at: string;
+  ticket: number;
+  symbol: string;
+  side: "BUY" | "SELL";
+  mode: TradingMode | null;
+  duration_seconds: number | null;
+  net_profit: number;
+  close_reason: string;
+  adverse_excursion_pips: number | null;
+  favorable_excursion_pips: number | null;
+  sl_distance_pips: number;
+  main_factor: string;
+  factors: string[];
+  pattern_description: string;
+  entry_reason: string;
+}
+
+export interface MistakePattern {
+  key: string;
+  symbol: string;
+  mode: TradingMode | null;
+  side: "BUY" | "SELL";
+  description: string;
+  wins: number;
+  losses: number;
+  total_loss: number;
+  main_factor?: string;
+  loss_tickets: number[];
+  last_loss_at?: string;
+  blocking: boolean;
+}
+
+export interface LearningReport {
+  enabled: boolean;
+  trades_logged: number;
+  open: number;
+  simulated: number;
+  closed: number;
+  wins: number;
+  losses: number;
+  blocking_patterns: number;
+  rules: { min_losses: number; min_loss_rate: number; memory_days: number };
+  recent_trades: LearningTrade[];
+  recent_losses: LossAnalysis[];
+  patterns: MistakePattern[];
+}
+
+// --- Connexion dynamique à un compte MT5 (/api/auth/*) ---
+
+export interface MT5Session {
+  /** env = compte du .env, dashboard = choisi depuis l'interface */
+  source: "env" | "dashboard";
+  login: number | null;
+  server: string | null;
+  name: string;
+  company: string;
+  account_type: string;
+  currency: string | null;
+  balance: number | null;
+  mode: Mode;
+  engine_paused: boolean;
+  /** Bouton « Algo Trading » du terminal ; false : MT5 refusera les ordres */
+  algo_trading: boolean | null;
+  message: string;
+}
+
+export interface MT5LoginRequest {
+  login: number;
+  password: string;
+  server: string;
+}
+
+// --- Mode analyste (/api/analysis/*) ---
+
+/** GET /api/analysis/risk : limites journalières */
+export interface RiskLimits {
+  /** Perte du jour en % du solde de début de journée (positive = perte) */
+  daily_loss_pct: number | null;
+  max_daily_loss_pct: number;
+  daily_loss_reached: boolean;
+  consecutive_losses: number;
+  max_consecutive_losses: number;
+  consecutive_losses_reached: boolean;
+  risk_per_trade_pct: number;
+  max_total_risk_pct: number;
+  max_open_positions: number;
+  deals_today: number;
+}
+
+export type SetupStatus = "surveillance" | "prêt" | "expiré" | "invalidé";
+
+export interface AnalysisSetup {
+  id: string;
+  created_at: string;
+  expires_at: string | null;
+  symbol: string;
+  side: "BUY" | "SELL";
+  style: TradingMode;
+  strategy: string;
+  regime: string;
+  entry_price: number;
+  stop_loss: number;
+  take_profit: number | null;
+  volume: number;
+  risk_amount: number;
+  risk_pct: number;
+  net_reward_risk: number | null;
+  status: SetupStatus;
+  reason: string;
+  notes: string[];
+  pros: string[];
+  cons: string[];
+}
+
+export interface SetupsReport {
+  generated_at: string;
+  broker: string;
+  min_net_reward_risk: number;
+  setups: AnalysisSetup[];
+  errors: string[];
+}
+
+export interface SwingPivotOut {
+  kind: "high" | "low";
+  time: number;
+  price: number;
+  confirmed_at: number;
+}
+
+/** GET /api/analysis/indicators : séries alignées sur `times` (null pendant le préchauffage) */
+export interface Indicators {
+  symbol: string;
+  timeframe: string;
+  times: number[];
+  atr: (number | null)[];
+  adx: (number | null)[];
+  plus_di: (number | null)[];
+  minus_di: (number | null)[];
+  pivots: SwingPivotOut[];
+  /** Pivots de la séance précédente (S2, S1, P, R1, R2) */
+  levels: { name: string; price: number }[];
+  range_bounds: [number, number] | null;
+  regime: string;
+  structure: string;
+  reasons: string[];
+}
+
+export interface StrategyStats {
+  trades: number;
+  wins: number;
+  losses: number;
+  win_rate_pct: number;
+  net_profit: number;
+  expectancy: number;
+  expectancy_r: number;
+  avg_win: number;
+  avg_loss: number;
+  profit_factor: number | null;
+  max_drawdown: number;
+  max_losing_streak: number;
+  ambiguous: number;
+}
+
+export interface BacktestReport {
+  file: string;
+  kind: string;
+  symbol: string;
+  generated_at: string;
+  start: string | null;
+  end: string | null;
+  initial_balance: number;
+  stats: StrategyStats;
+  equity_drawdown: number;
+  equity_drawdown_pct: number;
+  /** stratégie, actif, horizon, régime, sens */
+  segments: Record<string, Record<string, StrategyStats>>;
+  decisions: Record<string, number>;
+  equity: { time: number; equity: number }[];
+}
+
+export interface PerformanceReport {
+  live: { overall: StrategyStats; by_strategy: Record<string, StrategyStats> };
+  backtests: BacktestReport[];
 }

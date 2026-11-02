@@ -2,14 +2,21 @@ import type {
   Account,
   AccountsList,
   BotDecisions,
+  LearningReport,
+  MT5LoginRequest,
+  MT5Session,
   Candles,
   ClosedPosition,
   ControlResult,
   DataFeeds,
+  Indicators,
   KillSwitchResult,
   ModeResult,
+  PerformanceReport,
   Position,
+  RiskLimits,
   Sentiment,
+  SetupsReport,
   Status,
   WebhookLog,
 } from "./types";
@@ -162,8 +169,32 @@ export const api = {
       timeoutMs: SENTIMENT_TIMEOUT_MS,
     }),
   webhookEvents: (c: Connection, signal?: AbortSignal) => request<WebhookLog>(c, "/api/webhooks/events", { signal }),
+  /** Compte MT5 actif et son origine (.env ou dashboard) */
+  session: (c: Connection, signal?: AbortSignal) => request<MT5Session>(c, "/api/auth/session", { signal }),
+  /** Connecte le bot à un autre compte MT5 (moteur mis en pause et en PAPER côté serveur) */
+  login: (c: Connection, credentials: MT5LoginRequest) =>
+    request<MT5Session>(c, "/api/auth/login", { method: "POST", body: credentials, timeoutMs: 90_000 }),
+  /** Revient au compte du .env */
+  logout: (c: Connection) => request<MT5Session>(c, "/api/auth/logout", { method: "POST", timeoutMs: 90_000 }),
+  /** Journal des trades, post-mortem des pertes et mémoire des erreurs */
+  learning: (c: Connection, signal?: AbortSignal) => request<LearningReport>(c, "/api/learning?limit=20", { signal }),
+  /** Mode analyste : limites de risque journalières */
+  riskLimits: (c: Connection, signal?: AbortSignal) => request<RiskLimits>(c, "/api/analysis/risk", { signal }),
+  /** Mode analyste : setups des stratégies (analyse complète côté serveur, mise en cache 15 s) */
+  setups: (c: Connection, signal?: AbortSignal) =>
+    request<SetupsReport>(c, "/api/analysis/setups", { signal, timeoutMs: 60_000 }),
+  /** Mode analyste : ATR, ADX, pivots confirmés, supports / résistances et régime (bougies clôturées) */
+  indicators: (c: Connection, symbol: string, timeframe: string, count: number, signal?: AbortSignal) =>
+    request<Indicators>(
+      c,
+      `/api/analysis/indicators?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&count=${count}`,
+      { signal },
+    ),
+  /** Mode analyste : statistiques par stratégie (trades clos et rapports de backtest) */
+  performance: (c: Connection, signal?: AbortSignal) =>
+    request<PerformanceReport>(c, "/api/analysis/performance", { signal }),
   /** Journal des décisions et rejets du moteur (les plus récentes d'abord) */
-  botDecisions: (c: Connection, filter: "all" | "accepted" | "rejected", limit: number, signal?: AbortSignal) =>
+  botDecisions: (c: Connection, filter: "all" | "accepted" | "rejected" | "actions", limit: number, signal?: AbortSignal) =>
     request<BotDecisions>(
       c,
       `/api/bot/decisions?limit=${limit}${filter === "all" ? "" : `&status=${filter}`}`,

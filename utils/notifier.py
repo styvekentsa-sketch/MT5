@@ -1,5 +1,5 @@
 """
-Alertes en temps réel : Telegram (bot) et/ou Discord (webhook).
+Alertes en temps réel : Telegram (bot), Discord (webhook) et/ou console (NOTIFY_CONSOLE).
 
 Envoi NON BLOQUANT : `notify()` dépose le message dans une file et rend la main
 immédiatement ; un thread démon se charge de l'envoi HTTP. Une panne réseau, une API
@@ -21,6 +21,7 @@ Usage :
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -137,6 +138,21 @@ class DiscordChannel:
         _post_json(self._url, payload, self._timeout, self.name)
 
 
+class ConsoleChannel:
+    name = "Console"
+
+    def __init__(self, stream=None) -> None:
+        self._stream = stream
+
+    def send(self, text: str) -> None:
+        stream = self._stream or sys.stdout
+        try:
+            stream.write(f"{text}\n")
+        except UnicodeEncodeError:                     # console Windows sans UTF-8 : émojis retirés
+            stream.write(text.encode("ascii", "replace").decode("ascii") + "\n")
+        stream.flush()
+
+
 # =============================================================================
 #  Notifieur
 # =============================================================================
@@ -229,9 +245,9 @@ class Notifier:
 
 
 def build_channels() -> list[Channel]:
-    """Canaux configurés dans settings.notifier (Telegram et/ou Discord)."""
+    """Canaux configurés dans settings.notifier (console, Telegram et/ou Discord)."""
     cfg = settings.notifier
-    channels: list[Channel] = []
+    channels: list[Channel] = [ConsoleChannel()] if cfg.console else []
     if cfg.telegram_bot_token and cfg.telegram_chat_id:
         channels.append(TelegramChannel(cfg.telegram_bot_token, cfg.telegram_chat_id, cfg.timeout_seconds))
     if cfg.discord_webhook_url:

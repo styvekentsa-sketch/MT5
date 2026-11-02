@@ -9,7 +9,10 @@ Conventions d'exécution (prudentes) :
   - les bougies sont en prix Bid ; Ask = Bid + spread
   - un BUY s'ouvre à l'Ask et se clôture au Bid ; un SELL l'inverse
   - ouverture de bougie au-delà du SL/TP (gap) : exécution au prix d'ouverture
-  - SL et TP touchés dans la même bougie : le SL est retenu (pire cas)
+  - SL et TP touchés dans la même bougie : le SL est retenu (pire cas) et le trade est marqué
+    `ambiguous` (l'ordre réel des prix dans la bougie est inconnu)
+  - glissement (`slippage_points`) défavorable sur les ordres au marché (entrée) et les stops ;
+    un TP (ordre limite) est exécuté à son prix
   - profit = écart / tick_size x tick_value x volume (devise de cotation = devise du compte)
 """
 
@@ -55,19 +58,21 @@ class Trade:
     exit_reason: ExitReason
     commission: float
     profit: float                    # net, commission déduite
+    ambiguous: bool = False          # SL et TP touchés dans la même bougie : SL retenu par convention
 
 
 class SimulatedBroker:
     """Compte et carnet de positions simulés pour un symbole."""
 
     def __init__(self, specs: SymbolSpecs, initial_balance: float, currency: str = "USD", leverage: int = 100,
-                 commission_per_lot: float = 0.0) -> None:
+                 commission_per_lot: float = 0.0, slippage_points: int = 0) -> None:
         if initial_balance <= 0:
             raise ValueError("le capital initial doit être > 0")
         self.specs = specs
         self.currency = currency
         self.leverage = leverage
         self.commission_per_lot = commission_per_lot
+        self.slippage = max(0, int(slippage_points)) * specs.point
         self.balance = float(initial_balance)
         self.positions: list[SimPosition] = []
         self.trades: list[Trade] = []
@@ -146,10 +151,11 @@ class SimulatedBroker:
         return self.balance + self.floating_profit()
 
     def open_position(self, side: Side, volume: float, sl: float, tp: float | None) -> SimPosition:
-        """Ouvre au prix courant : Ask pour un achat, Bid pour une vente."""
+        """Ouvre au prix courant : Ask (+ glissement) pour un achat, Bid (- glissement) pour une vente."""
         position = SimPosition(
             ticket=next(self._tickets), symbol=self.specs.symbol, side=side, volume=volume,
-            entry_price=self.ask if side == "BUY" else self.bid, sl=sl, tp=tp, opened_at=self._clock,
+            entry_price=self.ask + self.slippage if side == "BUY" else self.bid - self.slippage, sl=sl, tp=tp,
+            opened_at=self._clock,
             magic=settings.trading.magic_number,
         )
         self.positions.append(position)
@@ -160,41 +166,45 @@ class SimulatedBroker:
         spread = max(0, int(spread_points)) * self.specs.point
         closed: list[Trade] = []
         for position in list(self.positions):
-            exit_price, reason = self._exit_level(position, open_, high, low, spread)
+            exit_price, reason, ambiguous = self._exit_level(position, open_, high, low, spread, self.slippage)
             if exit_price is not None and reason is not None:
-                closed.append(self._close(position, exit_price, time, reason))
+                closed.append(self._close(position, exit_price, time, reason, ambiguous))
         return closed
 
     @staticmethod
-    def _exit_level(p: SimPosition, open_: float, high: float, low: float,
-                    spread: float) -> tuple[float | None, ExitReason | None]:
+    def _exit_level(p: SimPosition, open_: float, high: float, low: float, spread: float,
+                    slippage: float = 0.0) -> tuple[float | None, ExitReason | None, bool]:
+        """(prix de sortie, motif, ambiguïté). Gap : prix d'ouverture ; stop : glissement défavorable."""
         if p.side == "BUY":                          # clôture au Bid
             if open_ <= p.sl:
-                return open_, "sl"
+                return open_ - slippage, "sl", False
             if p.tp is not None and open_ >= p.tp:
-                return open_, "tp"
-            if low <= p.sl:
-                return p.sl, "sl"                    # SL prioritaire si SL et TP dans la même bougie
-            if p.tp is not None and high >= p.tp:
-                return p.tp, "tp"
-            return None, None
+                return open_, "tp", False
+            hit_tp = p.tp is not None and high >= p.tp
+            if low <= p.sl:                          # SL prioritaire si SL et TP dans la même bougie
+                return p.sl - slippage, "sl", hit_tp
+            if hit_tp:
+                return p.tp, "tp", False
+            return None, None, False
         ask_open, ask_high, ask_low = open_ + spread, high + spread, low + spread   # SELL : clôture à l'Ask
         if ask_open >= p.sl:
-            return ask_open, "sl"
+            return ask_open + slippage, "sl", False
         if p.tp is not None and ask_open <= p.tp:
-            return ask_open, "tp"
+            return ask_open, "tp", False
+        hit_tp = p.tp is not None and ask_low <= p.tp
         if ask_high >= p.sl:
-            return p.sl, "sl"
-        if p.tp is not None and ask_low <= p.tp:
-            return p.tp, "tp"
-        return None, None
+            return p.sl + slippage, "sl", hit_tp
+        if hit_tp:
+            return p.tp, "tp", False
+        return None, None, False
 
     def close_all(self, time: datetime, bid: float) -> list[Trade]:
         """Clôture les positions restantes au dernier prix (fin des données)."""
         self._bid = bid
         return [self._close(p, bid if p.side == "BUY" else self.ask, time, "end") for p in list(self.positions)]
 
-    def _close(self, position: SimPosition, exit_price: float, time: datetime, reason: ExitReason) -> Trade:
+    def _close(self, position: SimPosition, exit_price: float, time: datetime, reason: ExitReason,
+               ambiguous: bool = False) -> Trade:
         commission = self.commission_per_lot * position.volume
         profit = self.calc_profit(position.side, position.symbol, position.volume, position.entry_price,
                                   exit_price) - commission
@@ -204,7 +214,7 @@ class SimulatedBroker:
             ticket=position.ticket, symbol=position.symbol, side=position.side, volume=position.volume,
             entry_time=position.opened_at, entry_price=position.entry_price, exit_time=time,
             exit_price=exit_price, sl=position.sl, tp=position.tp, exit_reason=reason,
-            commission=round(commission, 2), profit=round(profit, 2),
+            commission=round(commission, 2), profit=round(profit, 2), ambiguous=ambiguous,
         )
         self.trades.append(trade)
         self._deals.append(ClosedDeal(ticket=position.ticket, symbol=position.symbol, time=time,

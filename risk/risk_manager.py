@@ -30,10 +30,9 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from decimal import ROUND_FLOOR, Decimal
 from typing import Any, Protocol
 
-from brokers.models import POSITION_TYPE_BUY, AccountInfo, ClosedDeal, SymbolSpecs, Tick, format_volume
+from brokers.models import POSITION_TYPE_BUY, AccountInfo, ClosedDeal, SymbolSpecs, Tick
 from brokers.mt5_client import (
     calc_margin,
     calc_profit,
@@ -44,6 +43,7 @@ from brokers.mt5_client import (
     get_symbol_specs,
 )
 from config.settings import settings
+from risk.calculator import floor_to_step, size_position
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -59,7 +59,6 @@ REWARD_RISK_TOLERANCE = 0.98         # ratio mesuré au prix de validation : 1 t
 RISK_TOLERANCE = 1.05                # perte au SL tolérée jusqu'à 105 % du budget (arrondis broker)
 MAX_MARGIN_USAGE = 0.90              # marge requise <= 90 % de la marge libre
 VOLUME_EPSILON = 1e-9
-VOLUME_DECIMALS = 8                  # absorbe les erreurs d'arrondi flottant avant l'arrondi au pas
 
 
 # =============================================================================
@@ -127,15 +126,7 @@ def _risk_budget(account: AccountInfo) -> float:
     return _risk_capital(account) * settings.risk.risk_per_trade_pct / 100
 
 
-def _floor_to_step(volume: float, step: float) -> float:
-    """
-    Arrondit vers le bas au pas de volume du broker (Decimal : pas d'erreur de flottant).
-    Le volume est d'abord arrondi à VOLUME_DECIMALS : sans cela, 100 / 200.00000000000017
-    (= 0.4999999999999996) tomberait à 0.49 au lieu de 0.50.
-    """
-    d_step = Decimal(str(step))
-    d_volume = Decimal(str(round(volume, VOLUME_DECIMALS)))
-    return float((d_volume / d_step).to_integral_value(rounding=ROUND_FLOOR) * d_step)
+_floor_to_step = floor_to_step          # arrondi au pas : une seule implémentation (risk/calculator.py)
 
 
 def _volume_bounds(specs: SymbolSpecs) -> tuple[float, float]:
@@ -175,60 +166,28 @@ def _loss_per_lot(symbol: str, side: str, entry: float, sl: float, specs: Symbol
 
 def calculate_position_size(symbol: str, entry_price: float, sl_price: float, broker: Broker | None = None) -> float:
     """
-    Volume (lots) tel que la perte au Stop Loss vaille `risk_per_trade_pct` % du capital.
-
-    lot = (capital x risque %) / perte_par_lot, où perte_par_lot est la perte en devise
-    du compte pour 1 lot entre `entry_price` et `sl_price`. Le résultat est arrondi
-    VERS LE BAS au pas du broker et plafonné à min(volume_max broker, RISK_MAX_LOT).
+    Volume (lots / contrats) tel que la perte au Stop Loss respecte à la fois le risque par
+    position (RISK_PER_TRADE_PCT) et le risque cumulé restant (RISK_MAX_TOTAL_RISK_PCT moins
+    les positions ouvertes), arrondi VERS LE BAS au pas du broker (voir risk/calculator.py).
 
     Returns:
-        Le volume, ou 0.0 = ne pas trader : prix invalides, compte/symbole indisponible,
-        ou lot minimal (broker / RISK_MIN_LOT) qui ferait dépasser le risque autorisé.
+        Le volume, ou 0.0 = ne pas trader (prix invalides, compte / symbole indisponible,
+        volume minimal qui dépasserait le budget, position ouverte sans SL...).
     """
     broker = broker or LIVE_BROKER
     try:
         if not _valid_price(entry_price) or not _valid_price(sl_price):
             log.error("[%s] Prix invalides (entrée %r, SL %r) : volume 0", symbol, entry_price, sl_price)
             return 0.0
-        if entry_price == sl_price:
-            log.error("[%s] SL égal au prix d'entrée : volume 0", symbol)
+        result = size_position(symbol, entry_price, sl_price, broker)
+        if result.volume <= 0:
+            log.warning("[%s] Pas de trade : %s", symbol, result.reason or "volume nul")
             return 0.0
-        side = "BUY" if sl_price < entry_price else "SELL"
-
-        account = broker.get_account_info()
-        if account is None or _risk_capital(account) <= 0:
-            log.error("[%s] Capital indisponible ou nul : volume 0", symbol)
-            return 0.0
-        specs = broker.get_symbol_specs(symbol)
-        if specs is None:
-            return 0.0
-
-        loss_per_lot = _loss_per_lot(symbol, side, entry_price, sl_price, specs, broker)
-        if not loss_per_lot or loss_per_lot <= 0:
-            log.error("[%s] Perte par lot incalculable : volume 0", symbol)
-            return 0.0
-
-        budget = _risk_budget(account)
-        raw_volume = budget / loss_per_lot
-        min_volume, max_volume = _volume_bounds(specs)
-        volume = _floor_to_step(min(raw_volume, max_volume), specs.volume_step)
-
-        unit = specs.volume_unit
-        if volume < min_volume - VOLUME_EPSILON:
-            log.warning("[%s] Volume calculé %.8g < minimum %s %s : le minimum risquerait %.2f %s (budget %.2f) : "
-                        "pas de trade", symbol, raw_volume, format_volume(min_volume, specs.volume_step), unit,
-                        loss_per_lot * min_volume, account.currency, budget)
-            return 0.0
-        if specs.min_notional and _notional(volume, entry_price, specs) < specs.min_notional:
-            log.warning("[%s] Ordre de %.2f < valeur minimale %.2f exigée par l'exchange : capital trop faible "
-                        "pour ce SL, pas de trade", symbol, _notional(volume, entry_price, specs), specs.min_notional)
-            return 0.0
-
-        log.info("[%s] Volume %s %s (brut %.8g) | risque %.2f %s (%.2f%% de %.2f) | SL à %.5f du prix",
-                 symbol, format_volume(volume, specs.volume_step), unit, raw_volume, loss_per_lot * volume,
-                 account.currency, settings.risk.risk_per_trade_pct, _risk_capital(account),
-                 abs(entry_price - sl_price))
-        return volume
+        log.info("[%s] Volume %g (brut %.8g, limité par le %s) | risque %.2f (%.2f%% de %.2f) | "
+                 "risque ouvert %.2f, budget cumulé restant %.2f",
+                 symbol, result.volume, result.raw_volume, result.limited_by, result.risk_amount, result.risk_pct,
+                 result.capital, result.open_risk, result.cumulative_budget_left)
+        return result.volume
     except Exception:  # noqa: BLE001 - MT5ConnectionError, données broker inattendues...
         log.exception("[%s] Erreur lors du calcul de la taille de position : volume 0", symbol)
         return 0.0
@@ -249,6 +208,30 @@ def _check_spread(tick: Tick, specs: SymbolSpecs) -> list[str]:
     return []
 
 
+def _check_spread_vs_stop(tick: Tick, entry: float, sl: float) -> list[str]:
+    """Spread rapporté à la distance entrée - stop : au-delà de RISK_MAX_SPREAD_SL_PCT, le coût d'entrée est trop lourd."""
+    distance = abs(entry - sl)
+    if distance <= 0:
+        return []
+    ratio = (tick.ask - tick.bid) / distance * 100
+    if ratio > settings.risk.max_spread_sl_pct:
+        return [f"spread = {ratio:.1f}% de la distance entrée-stop (maximum {settings.risk.max_spread_sl_pct:g}%)"]
+    return []
+
+
+# Motifs du diagnostic déjà couverts par les autres contrôles (pas de doublon dans le motif)
+_DIAGNOSTIC_DUPLICATES = {"spread_max", "spread_sl"}
+
+
+def _check_diagnostic(symbol: str, broker: Broker) -> list[str]:
+    """Verdict de tradabilité du broker (tick périmé, spread anormal vs sa médiane...), s'il le fournit."""
+    diagnose = getattr(broker, "diagnose_symbol", None)
+    diagnostic = diagnose(symbol) if diagnose else None
+    if diagnostic is None:
+        return []
+    return [f.message for f in diagnostic.failures if f.code not in _DIAGNOSTIC_DUPLICATES]
+
+
 def _check_exposure(symbol: str, broker: Broker) -> list[str]:
     """Nombre de positions du bot, au total et sur ce symbole."""
     positions = broker.get_open_positions()
@@ -262,6 +245,41 @@ def _check_exposure(symbol: str, broker: Broker) -> list[str]:
     return failures
 
 
+def daily_loss_pct(account: AccountInfo, deals: list[ClosedDeal]) -> float | None:
+    """
+    Perte du jour en % du solde de début de journée (réalisée depuis 00:00 UTC + latente,
+    tout le compte) ; positive = perte. None si le solde de début de journée est nul.
+    """
+    realized = sum(d.net_profit for d in deals)
+    start_balance = account.balance - realized
+    if start_balance <= 0:
+        return None
+    return -(realized + account.profit) / start_balance * 100
+
+
+def daily_stop_reached(broker: Broker | None = None) -> str | None:
+    """Motif si la perte journalière maximale (RISK_MAX_DAILY_LOSS_PCT) est atteinte, sinon None."""
+    broker = broker or LIVE_BROKER
+    account = broker.get_account_info()
+    if account is None:
+        return None
+    start_of_day = broker.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    loss = daily_loss_pct(account, broker.get_closed_deals(start_of_day))
+    if loss is not None and loss >= settings.risk.max_daily_loss_pct:
+        return f"perte journalière {loss:.2f}% >= limite {settings.risk.max_daily_loss_pct}%"
+    return None
+
+
+def consecutive_losses(deals: list[ClosedDeal]) -> int:
+    """Pertes consécutives les plus récentes du bot (numéro magique) parmi `deals`."""
+    streak = 0
+    for deal in reversed([d for d in deals if d.magic == settings.trading.magic_number]):
+        if deal.net_profit >= 0:
+            break
+        streak += 1
+    return streak
+
+
 def _check_daily_limits(account: AccountInfo, broker: Broker) -> list[str]:
     """
     Perte journalière (réalisée depuis 00:00 UTC + latente, tout le compte) et
@@ -269,21 +287,15 @@ def _check_daily_limits(account: AccountInfo, broker: Broker) -> list[str]:
     """
     start_of_day = broker.now().replace(hour=0, minute=0, second=0, microsecond=0)
     deals = broker.get_closed_deals(start_of_day)
-    realized = sum(d.net_profit for d in deals)
-    start_balance = account.balance - realized
     failures = []
 
-    if start_balance <= 0:
+    loss = daily_loss_pct(account, deals)
+    if loss is None:
         return ["solde de début de journée nul ou négatif"]
-    daily_loss_pct = -(realized + account.profit) / start_balance * 100
-    if daily_loss_pct >= settings.risk.max_daily_loss_pct:
-        failures.append(f"perte journalière {daily_loss_pct:.2f}% >= limite {settings.risk.max_daily_loss_pct}%")
+    if loss >= settings.risk.max_daily_loss_pct:
+        failures.append(f"perte journalière {loss:.2f}% >= limite {settings.risk.max_daily_loss_pct}%")
 
-    streak = 0
-    for deal in reversed([d for d in deals if d.magic == settings.trading.magic_number]):
-        if deal.net_profit >= 0:
-            break
-        streak += 1
+    streak = consecutive_losses(deals)
     if streak >= settings.risk.max_consecutive_losses:
         failures.append(f"{streak} pertes consécutives aujourd'hui (maximum {settings.risk.max_consecutive_losses})")
     return failures
@@ -509,6 +521,8 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
         # 3. Règles de risque (toutes évaluées pour un motif complet)
         failures = (
             _check_spread(tick, specs)
+            + _check_spread_vs_stop(tick, entry, sl)
+            + _check_diagnostic(symbol, broker)
             + _check_exposure(symbol, broker)
             + _check_daily_limits(account, broker)
             + _check_volume(volume, specs, entry)

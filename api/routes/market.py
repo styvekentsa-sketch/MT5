@@ -65,3 +65,24 @@ def get_candles(
             for ts, row in zip(df.index, df.itertuples(index=False))
         ],
     )
+
+
+@router.get("/diagnostic", summary="Contrat et tradabilité d'un symbole")
+def get_diagnostic(
+    symbol: str = Query(..., description="Symbole configuré dans TRADING_SYMBOLS"),
+    entry: float | None = Query(None, gt=0, description="Prix d'entrée envisagé (contrôle spread / stop)"),
+    sl: float | None = Query(None, gt=0, description="Stop loss envisagé (contrôle spread / stop)"),
+    broker: BaseBroker = Depends(get_active_broker),
+) -> dict:
+    """
+    Spécifications du contrat (taille, volumes min / max / pas, décimales, taille du tick),
+    cotation (Bid, Ask, spread actuel et médian sur 60 minutes, âge du tick) et verdict :
+    l'actif est rejeté si introuvable, marché fermé, tick périmé ou spread anormal.
+    """
+    symbol = symbol.strip().upper()
+    if symbol not in settings.trading.symbols:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Symbole non suivi : {symbol}")
+    diagnostic = broker.diagnose_symbol(symbol, entry, sl)
+    if diagnostic is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Diagnostic non disponible pour {broker.name}")
+    return diagnostic.model_dump(mode="json")

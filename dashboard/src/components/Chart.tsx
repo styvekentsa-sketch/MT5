@@ -3,17 +3,21 @@ import {
   ColorType,
   CrosshairMode,
   createChart,
+  createSeriesMarkers,
+  LineSeries,
   LineStyle,
   type CreatePriceLineOptions,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { CandlestickChart, LoaderCircle } from "lucide-react";
+import { Activity, CandlestickChart, LoaderCircle } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, errorMessage, type Connection } from "../api/client";
-import type { Candle, Position } from "../api/types";
+import type { AnalysisSetup, Candle, Indicators, Position } from "../api/types";
 import { formatNumber, formatPrice, signColor } from "../lib/format";
 import { GlassCard } from "./ui/GlassCard";
 
@@ -39,7 +43,17 @@ const THEME = {
   stopLoss: "#d4928c",
   takeProfit: "#86bfa1",
   entry: "#7895b8",
+  // Indicateurs : teintes neutres, distinctes des niveaux de positions
+  level: "#6c6f75",
+  range: "#b59a62",
+  adx: "#c9c8c3",
+  plusDi: "#4ea37a",
+  minusDi: "#c76a62",
+  atr: "#7895b8",
 } as const;
+
+const INDICATORS_COUNT = 300;
+const INDICATORS_POLL_MS = 60_000;     // calculés sur les bougies clôturées : inutile de les relire plus souvent
 
 type LevelKind = "entry" | "sl" | "tp";
 
@@ -80,6 +94,48 @@ function positionLevels(positions: Position[]): Map<string, CreatePriceLineOptio
   return levels;
 }
 
+/** Niveaux des setups proposés (mode analyste) : pointillés fins, libellés « stratégie SL ». */
+function setupLevels(setups: AnalysisSetup[]): Map<string, CreatePriceLineOptions> {
+  const levels = new Map<string, CreatePriceLineOptions>();
+  for (const s of setups) {
+    const add = (kind: LevelKind, price: number | null, title: string) => {
+      if (price === null || !Number.isFinite(price) || price <= 0) return;
+      levels.set(`setup:${s.strategy}:${s.side}:${kind}`, {
+        price,
+        color: LEVEL_STYLE[kind].color,
+        lineStyle: LineStyle.Dotted,
+        lineWidth: 1,
+        lineVisible: true,
+        axisLabelVisible: true,
+        axisLabelColor: LEVEL_STYLE[kind].color,
+        axisLabelTextColor: THEME.background,
+        title: `${s.strategy} ${title}`,
+      });
+    };
+    add("entry", s.entry_price, s.side === "BUY" ? "achat" : "vente");
+    add("sl", s.stop_loss, "SL");
+    add("tp", s.take_profit, "TP");
+  }
+  return levels;
+}
+
+/** Supports / résistances de séance et bornes du range : lignes discrètes, sans étiquette d'axe. */
+function indicatorLevels(ind: Indicators | null): Map<string, CreatePriceLineOptions> {
+  const levels = new Map<string, CreatePriceLineOptions>();
+  if (!ind) return levels;
+  const line = (key: string, price: number, title: string, color: string) =>
+    levels.set(key, { price, color, lineStyle: LineStyle.SparseDotted, lineWidth: 1, lineVisible: true, axisLabelVisible: false, title });
+  for (const lvl of ind.levels) line(`ind:${lvl.name}`, lvl.price, lvl.name, THEME.level);
+  if (ind.range_bounds) {
+    line("ind:range-low", ind.range_bounds[0], "range bas", THEME.range);
+    line("ind:range-high", ind.range_bounds[1], "range haut", THEME.range);
+  }
+  return levels;
+}
+
+const lineData = (times: number[], values: (number | null)[]) =>
+  times.map((t, i) => (values[i] === null ? { time: t as Time } : { time: t as Time, value: values[i] as number }));
+
 type FeedState =
   | { kind: "loading" }
   | { kind: "live" }
@@ -119,12 +175,14 @@ interface ChartProps {
   symbols: string[];
   /** Positions ouvertes (toutes paires) : SL, TP et entrée du symbole affiché sont tracés */
   positions: Position[] | null;
+  /** Setups proposés (mode analyste) : entrée, SL et TP du symbole affiché sont tracés en pointillés */
+  setups?: AnalysisSetup[] | null;
   /** False quand le graphique n'est pas à l'écran : aucune requête */
   active: boolean;
 }
 
 /** Graphique en bougies des symboles suivis, mis à jour en direct depuis l'API du bot. */
-export function PriceChart({ connection, symbols, positions, active }: ChartProps) {
+export function PriceChart({ connection, symbols, positions, setups = null, active }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -139,6 +197,14 @@ export function PriceChart({ connection, symbols, positions, active }: ChartProp
     () => (positions ?? []).filter((p) => p.symbol === symbol),
     [positions, symbol],
   );
+  const symbolSetups = useMemo(
+    () => (setups ?? []).filter((s) => s.symbol === symbol && (s.status === "prêt" || s.status === "surveillance")),
+    [setups, symbol],
+  );
+  const [showIndicators, setShowIndicators] = useState(false);
+  const [indicators, setIndicators] = useState<Indicators | null>(null);
+  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const panesRef = useRef<ISeriesApi<"Line">[]>([]);
 
   // Symbole par défaut : le premier suivi par le bot
   useEffect(() => {
@@ -188,14 +254,70 @@ export function PriceChart({ connection, symbols, positions, active }: ChartProp
       },
     });
     chartRef.current = chart;
+    markersRef.current = createSeriesMarkers(seriesRef.current, []);
     const lines = linesRef.current;
     return () => {
       chart.remove();                // détruit aussi les lignes de prix
       lines.clear();
       chartRef.current = null;
       seriesRef.current = null;
+      markersRef.current = null;
+      panesRef.current = [];
     };
   }, []);
+
+  // Indicateurs (bougies clôturées) : relus à chaque changement de symbole / unité, puis toutes les minutes
+  useEffect(() => {
+    setIndicators(null);
+    if (!active || !showIndicators || !symbol || !connection.apiKey) return;
+    const controller = new AbortController();
+    const load = () =>
+      api
+        .indicators(connection, symbol, timeframe, INDICATORS_COUNT, controller.signal)
+        .then((data) => !controller.signal.aborted && setIndicators(data))
+        .catch(() => undefined);                  // facultatif : le graphique reste utilisable sans
+    void load();
+    const timer = window.setInterval(load, INDICATORS_POLL_MS);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [active, showIndicators, symbol, timeframe, connection]);
+
+  // Pivots confirmés (marqueurs) et volets ADX / ATR sous les bougies
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    for (const series of panesRef.current) chart.removeSeries(series);   // volet vide : supprimé
+    panesRef.current = [];
+    markersRef.current?.setMarkers(
+      (indicators?.pivots ?? []).map((p) => ({
+        time: p.time as Time,
+        position: p.kind === "high" ? ("aboveBar" as const) : ("belowBar" as const),
+        shape: p.kind === "high" ? ("arrowDown" as const) : ("arrowUp" as const),
+        color: p.kind === "high" ? THEME.stopLoss : THEME.takeProfit,
+        size: 0.6,
+      })),
+    );
+    if (!indicators) return;
+    const line = (color: string, pane: number, title: string, values: (number | null)[], width: 1 | 2 = 1) => {
+      const series = chart.addSeries(
+        LineSeries,
+        { color, lineWidth: width, title, priceLineVisible: false, lastValueVisible: true, crosshairMarkerRadius: 3 },
+        pane,
+      );
+      series.setData(lineData(indicators.times, values));
+      panesRef.current.push(series);
+    };
+    line(THEME.adx, 1, "ADX", indicators.adx, 2);
+    line(THEME.plusDi, 1, "+DI", indicators.plus_di);
+    line(THEME.minusDi, 1, "−DI", indicators.minus_di);
+    line(THEME.atr, 2, "ATR", indicators.atr, 2);
+    const panes = chart.panes();
+    panes[0]?.setStretchFactor(4);
+    panes[1]?.setStretchFactor(1.2);
+    panes[2]?.setStretchFactor(1);
+  }, [indicators]);
 
   // Chargement de l'historique puis mise à jour de la dernière bougie, tant que le graphique est visible
   useEffect(() => {
@@ -288,7 +410,8 @@ export function PriceChart({ connection, symbols, positions, active }: ChartProp
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
-    const wanted = positionLevels(symbolPositions);
+    const traded = new Map([...positionLevels(symbolPositions), ...setupLevels(symbolSetups)]);
+    const wanted = new Map([...traded, ...indicatorLevels(indicators)]);
     const lines = linesRef.current;
     for (const [key, { line }] of lines) {
       if (!wanted.has(key)) {                  // position clôturée, ou SL / TP retiré
@@ -306,8 +429,9 @@ export function PriceChart({ connection, symbols, positions, active }: ChartProp
         existing.signature = signature;
       }
     }
-    levelPricesRef.current = [...wanted.values()].map((o) => o.price);
-  }, [symbolPositions]);
+    // l'échelle s'élargit pour les positions et les setups, pas pour les supports / résistances lointains
+    levelPricesRef.current = [...traded.values()].map((o) => o.price);
+  }, [symbolPositions, symbolSetups, indicators]);
 
   // 44 px par défaut (doigt) ; 36 px seulement si une souris est détectée
   const segment = "h-11 min-w-11 px-2.5 text-xs font-medium transition pointer-fine:h-9";
@@ -353,6 +477,28 @@ export function PriceChart({ connection, symbols, positions, active }: ChartProp
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={() => setShowIndicators((v) => !v)}
+            aria-pressed={showIndicators}
+            title="ATR, ADX, pivots confirmés, supports / résistances de séance et bornes du range"
+            className={`${segment} inline-flex items-center gap-1.5 rounded-md border border-line ${
+              showIndicators ? "bg-line text-white" : "text-slate-400 hover:bg-surface-2"
+            }`}
+          >
+            <Activity className="size-3.5" aria-hidden />
+            Indicateurs
+          </button>
+          {indicators && (
+            <span className="font-mono text-[11px] text-slate-400" title={indicators.reasons.join("\n")}>
+              régime {indicators.regime} · structure {indicators.structure}
+            </span>
+          )}
+          {symbolSetups.length > 0 && (
+            <span className="rounded border border-sky-500/40 px-1.5 py-0.5 text-[11px] text-sky-200">
+              {symbolSetups.length} setup{symbolSetups.length > 1 ? "s" : ""} proposé{symbolSetups.length > 1 ? "s" : ""}
+            </span>
+          )}
         </div>
         {quote && (
           <div className="flex items-baseline gap-3 font-mono tabular-nums">

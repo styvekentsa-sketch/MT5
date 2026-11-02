@@ -28,6 +28,9 @@ def create_broker(broker_type: str | None = None) -> BaseBroker:
     if kind == "mt5":
         from brokers.mt5_broker import MT5Broker
         return MT5Broker()
+    if kind == "sim":
+        from brokers.sim_broker import SimBroker
+        return SimBroker()
     if kind == "ccxt":
         try:
             import ccxt  # noqa: F401

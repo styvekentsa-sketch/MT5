@@ -8,3 +8,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# Rapports JSON de backtest (python -m backtesting.setup_engine)
+reports/backtests/
