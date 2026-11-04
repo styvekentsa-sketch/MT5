@@ -403,6 +403,68 @@ def open_positions_risk(broker: Broker) -> tuple[float, list[str]]:
     return total, unbounded
 
 
+def currency_exposure(symbol: str, side: str) -> dict[str, int]:
+    """
+    Sens de l'exposition par devise : EURUSD achat -> {EUR: +1, USD: -1} ; XAUUSD achat -> {XAU: +1, USD: -1}.
+    Symbole non décomposable : exposition propre au symbole.
+    """
+    from sentiment.sentiment_analyzer import split_symbol
+
+    sign = 1 if side == "BUY" else -1
+    base, quote = split_symbol(symbol)
+    if base is None:
+        return {symbol.upper(): sign}
+    return {base: sign, **({quote: -sign} if quote else {})}
+
+
+def _exposure_label(currency: str, sign: int) -> str:
+    return f"{currency} {'acheteur' if sign > 0 else 'vendeur'}"
+
+
+def currency_risk(broker: Broker) -> dict[tuple[str, int], float]:
+    """Perte au SL des positions du bot, cumulée par (devise, sens) : mesure simple de la corrélation."""
+    totals: dict[tuple[str, int], float] = {}
+    for position in broker.get_open_positions():
+        sl = getattr(position, "sl", None)
+        entry = getattr(position, "price_open", None) or getattr(position, "entry_price", None)
+        if not _valid_price(sl) or not _valid_price(entry):
+            continue                                       # signalé comme risque non borné par ailleurs
+        side = _position_side(position)
+        profit = broker.calc_profit(side, position.symbol, position.volume, entry, sl)
+        if profit is None or profit >= 0:
+            continue
+        for currency, sign in currency_exposure(position.symbol, side).items():
+            totals[(currency, sign)] = totals.get((currency, sign), 0.0) - profit
+    return totals
+
+
+def correlated_budget(symbol: str, side: str, capital: float, broker: Broker) -> tuple[float, str]:
+    """Risque encore disponible pour ce trade sous RISK_MAX_CURRENCY_RISK_PCT, et l'exposition qui le limite."""
+    limit = capital * settings.risk.max_currency_risk_pct / 100
+    open_risk = currency_risk(broker)
+    left, label = math.inf, ""
+    for currency, sign in currency_exposure(symbol, side).items():
+        room = max(0.0, limit - open_risk.get((currency, sign), 0.0))
+        if room < left:
+            left, label = room, _exposure_label(currency, sign)
+    return left, label
+
+
+def _check_correlation(symbol: str, side: str, potential_loss: float | None, capital: float,
+                       broker: Broker) -> list[str]:
+    if potential_loss is None or capital <= 0:
+        return []
+    limit = settings.risk.max_currency_risk_pct
+    open_risk = currency_risk(broker)
+    failures = []
+    for currency, sign in currency_exposure(symbol, side).items():
+        total_pct = (open_risk.get((currency, sign), 0.0) + potential_loss) / capital * 100
+        if total_pct > limit * RISK_TOLERANCE:
+            failures.append(f"exposition corrélée {_exposure_label(currency, sign)} {total_pct:.2f}% > limite {limit}% "
+                            f"(positions dans le même sens + ce trade)")
+    return failures
+
+
 def _check_portfolio(
     potential_loss: float | None, margin: float | None, account: AccountInfo, broker: Broker,
 ) -> tuple[list[str], float | None]:
@@ -531,7 +593,8 @@ def validate_trade_risk(symbol: str, action: str, volume: float, sl: float, tp: 
         risk_failures, potential_loss, margin = _check_risk_and_margin(
             symbol, side, volume, entry, sl, account, specs, broker)
         portfolio_failures, total_risk_pct = _check_portfolio(potential_loss, margin, account, broker)
-        failures += risk_failures + portfolio_failures
+        failures += risk_failures + portfolio_failures + _check_correlation(symbol, side, potential_loss, capital,
+                                                                            broker)
         return _verdict(symbol, side, volume, sl, tp, failures, entry, potential_loss, capital, total_risk_pct)
     except Exception as exc:  # noqa: BLE001 - MT5ConnectionError, données broker inattendues...
         log.exception("[%s] Erreur pendant la validation du risque", symbol)

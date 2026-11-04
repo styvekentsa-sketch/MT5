@@ -29,6 +29,26 @@ os.environ.update({
     "TRADING_SYMBOLS": "EURUSD,XAUUSD",
     "TRADING_TIMEFRAME": "M15",
     "STRATEGY_PROFILE": "standard",                     # indépendant du profil choisi dans le .env
+    # Breakout momentum : valeurs par défaut du code, quels que soient les réglages du .env
+    "STRATEGY_MOMENTUM_RESTART_BODY_ATR": "0",
+    "IMPULSE_ENABLED": "false",                        # moteur : activée test par test
+    "STRATEGY_SCALP_ENABLED": "false",
+    "OPPORTUNITY_SYMBOLS": "",
+    "STRATEGY_MOMENTUM_TARGET_RR": "3.0",
+    "STRATEGY_MOMENTUM_BREAKEVEN_R": "0",
+    "STRATEGY_MOMENTUM_TRAILING_ACTIVATION_R": "0",
+    "STRATEGY_MOMENTUM_MIN_H1_ADX": "22",
+    "STRATEGY_MOMENTUM_H1_OBSTACLE_ATR": "1.0",
+    "STRATEGY_MOMENTUM_H1_EMA_ALIGNMENT": "true",
+    "STRATEGY_MARGIN_MULTIPLIERS": "XAUUSD:1.5,XAGUSD:1.5",
+    "RISK_MIN_NET_REWARD_RISK": "3.0",
+    "RISK_ALLOW_MANUAL_REAL_ACCOUNT": "false",
+    "RISK_MAX_CURRENCY_RISK_PCT": "1.5",
+    "RISK_MAX_DRAWDOWN_PCT": "0",                      # suspension activée test par test (plus haut persistant)
+    "EXIT_TP1_FRACTION": "0",
+    "EXIT_TP2_FRACTION": "0",
+    "SHIELD_ACTION": "none",
+    "SHIELD_CLOSE_CONTRARY": "true",
     "LEARNING_ENABLED": "false",                       # mémoire des erreurs : activée test par test (tmp_path)
     "NEWS_RSS_FEEDS": "",
     "NEWS_DEFAULT_FEEDS": "false",                     # aucun accès réseau pendant les tests

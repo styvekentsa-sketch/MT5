@@ -213,7 +213,7 @@ def test_global_margin_usage_is_capped(broker, account):
 
 def test_raised_limits_allow_more_simultaneous_trades(broker, monkeypatch):
     wide = replace(settings, risk=replace(settings.risk, max_open_positions=5, max_positions_per_symbol=2,
-                                          max_total_risk_pct=5.0))
+                                          max_total_risk_pct=5.0, max_currency_risk_pct=5.0))
     monkeypatch.setattr(rm, "settings", wide)
     broker["positions"] = [_position("EURUSD", ticket=1), _position("GBPUSD", ticket=2), _position("XAUUSD", ticket=3)]
     assert _validate(symbol="EURUSD")["is_approved"] is True                       # 2e position EURUSD permise

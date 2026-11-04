@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from fastapi import HTTPException, Request, status
 
-from api.schemas import OutcomeOut, StatusOut
+from api.schemas import OpportunityOut, OutcomeOut, StatusOut
 from brokers.base import BaseBroker, is_dry_run
 from brokers.factory import get_broker
 from config.settings import settings
 from core.engine import TradingEngine
 from utils.logger import get_logger
+from utils.versioning import rules_version
 
 log = get_logger(__name__)
 
@@ -59,4 +60,8 @@ def build_status(engine: TradingEngine) -> StatusOut:
         last_cycle_at=engine.last_cycle_at,
         last_cycle_duration_seconds=engine.last_cycle_duration,
         last_outcomes=[OutcomeOut(symbol=o.symbol, status=o.status, detail=o.detail) for o in engine.last_outcomes],
+        opportunities=[OpportunityOut(**mode) for mode in engine.opportunity_summary()],
+        latency=engine.latency.summary(),
+        suspension=engine.suspension,
+        rules_version=rules_version(),
     )

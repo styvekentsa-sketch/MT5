@@ -8,12 +8,13 @@ interface RiskLimitsProps {
 }
 
 /** Jauge d'une limite : vert, puis ambre aux 2/3, puis rouge (et libellé) une fois atteinte. */
-function Gauge({ label, value, max, display, reached }: {
+function Gauge({ label, value, max, display, reached, reachedText = "Limite atteinte : aucun nouvel ordre aujourd'hui" }: {
   label: string;
   value: number;
   max: number;
   display: string;
   reached: boolean;
+  reachedText?: string;
 }) {
   const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0;
   const tone = reached ? "bg-rose-400" : ratio >= 2 / 3 ? "bg-amber-400" : "bg-emerald-400";
@@ -33,14 +34,16 @@ function Gauge({ label, value, max, display, reached }: {
       >
         <div className={`h-full rounded-full ${tone}`} style={{ width: `${ratio * 100}%` }} />
       </div>
-      {reached && <p className="mt-1 text-xs text-rose-300">Limite atteinte : aucun nouvel ordre aujourd'hui</p>}
+      {reached && <p className="mt-1 text-xs text-rose-300">{reachedText}</p>}
     </div>
   );
 }
 
-/** Limites de risque journalières : perte maximale du jour et pertes consécutives du bot. */
+/** Limites de risque : perte du jour, pertes consécutives, drawdown et exposition corrélée par devise. */
 export function RiskLimits({ limits }: RiskLimitsProps) {
-  const blocked = limits !== null && (limits.daily_loss_reached || limits.consecutive_losses_reached);
+  const blocked =
+    limits !== null && (limits.daily_loss_reached || limits.consecutive_losses_reached || !!limits.drawdown_reached);
+  const topExposure = limits?.currency_exposure?.[0];
   return (
     <GlassCard
       title="Limites de risque"
@@ -74,6 +77,26 @@ export function RiskLimits({ limits }: RiskLimitsProps) {
             display={`${limits.consecutive_losses} / ${limits.max_consecutive_losses}`}
             reached={limits.consecutive_losses_reached}
           />
+          {limits.max_drawdown_pct !== undefined && limits.max_drawdown_pct > 0 && (
+            <Gauge
+              label="Drawdown"
+              value={Math.max(0, limits.drawdown_pct ?? 0)}
+              max={limits.max_drawdown_pct}
+              display={`${formatNumber(Math.max(0, limits.drawdown_pct ?? 0), 2)} % / ${limits.max_drawdown_pct} %`}
+              reached={!!limits.drawdown_reached}
+              reachedText="Drawdown maximal atteint : nouvelles entrées suspendues"
+            />
+          )}
+          {limits.max_currency_risk_pct !== undefined && (
+            <Gauge
+              label={`Exposition corrélée${topExposure ? ` · ${topExposure.exposure}` : ""}`}
+              value={topExposure?.risk_pct ?? 0}
+              max={limits.max_currency_risk_pct}
+              display={`${formatNumber(topExposure?.risk_pct ?? 0, 2)} % / ${limits.max_currency_risk_pct} %`}
+              reached={(topExposure?.risk_pct ?? 0) >= limits.max_currency_risk_pct}
+              reachedText="Plus de nouvelle position dans le même sens sur cette devise"
+            />
+          )}
           <p className="font-mono text-[11px] text-slate-500 tabular-nums sm:col-span-2">
             {limits.risk_per_trade_pct} % par position · {limits.max_total_risk_pct} % cumulé ·{" "}
             {limits.max_open_positions} positions max · {limits.deals_today} transaction(s) aujourd'hui

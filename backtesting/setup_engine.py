@@ -56,6 +56,7 @@ log = get_logger(__name__)
 
 DEFAULT_SPREAD_POINTS = 10
 REPORTS_DIR = Path("reports/backtests")
+MAX_LOADED_BARS = 100_000                    # M1 sur une longue période : plafond de chargement
 EQUITY_POINTS = 400                           # courbe d'équité du rapport, sous-échantillonnée
 
 
@@ -64,6 +65,16 @@ class CostModel:
     spread_points: int | None = None          # None : colonne « spread » des bougies, sinon DEFAULT_SPREAD_POINTS
     slippage_points: int = 1                  # glissement défavorable (entrée au marché, stops)
     commission_per_lot: float = 0.0
+    swap_per_lot_night: float = 0.0           # financement payé par lot et par nuit (triple le mercredi)
+
+
+def financing_nights(entry: datetime, exit_: datetime) -> int:
+    """Nuits de financement : passages de minuit (heure des bougies), le mercredi compte triple (week-end)."""
+    nights, day = 0, entry.date()
+    while day < exit_.date():
+        nights += 3 if day.weekday() == 2 else 1
+        day += timedelta(days=1)
+    return nights
 
 
 @dataclass(frozen=True)
@@ -189,7 +200,29 @@ class SetupBacktestResult:
                     for key, st in groups.items()))
         return "\n".join(lines)
 
-    def to_report(self, symbol: str, costs: CostModel) -> dict[str, Any]:
+    def walk_forward(self, folds: int = 4) -> dict[str, Any]:
+        """
+        Périodes successives de même durée : la première sert de référence (période où les réglages ont
+        été choisis), les suivantes sont hors échantillon. Une stratégie robuste reste positive sur la
+        plupart des périodes futures ; un résultat porté par une seule période est suspect.
+        """
+        if folds < 2 or len(self.equity) < 2:
+            return {}
+        start, end = self.equity.index[0], self.equity.index[-1]
+        width = (end - start) / folds
+        periods = []
+        for k in range(folds):
+            lo, hi = start + k * width, start + (k + 1) * width
+            chosen = [t for t in self.trades if lo <= t.entry_time < hi or (k == folds - 1 and t.entry_time == hi)]
+            stats = compute_stats(chosen)
+            periods.append({"period": k + 1, "role": "référence" if k == 0 else "hors échantillon",
+                            "start": lo.isoformat(), "end": hi.isoformat(), **stats.to_dict()})
+        future = [p for p in periods[1:] if p["trades"]]
+        positive = sum(p["net_profit"] > 0 for p in future)
+        return {"folds": periods, "out_of_sample_positive": positive, "out_of_sample_traded": len(future),
+                "consistency_pct": round(positive / len(future) * 100, 1) if future else None}
+
+    def to_report(self, symbol: str, costs: CostModel, folds: int = 4) -> dict[str, Any]:
         """Rapport JSON : statistiques, segments, décisions et courbe d'équité (dashboard)."""
         step = max(1, len(self.equity) // EQUITY_POINTS)
         curve = self.equity.iloc[::step]
@@ -207,6 +240,7 @@ class SetupBacktestResult:
             "segments": {label: {key: st.to_dict() for key, st in groups.items()}
                          for label, groups in self.segments.items()},
             "decisions": dict(sorted(self.decisions.items())),
+            "walk_forward": self.walk_forward(folds),
             "equity": [{"time": int(ts.timestamp()), "equity": round(float(v), 2)} for ts, v in curve.items()],
         }
 
@@ -305,11 +339,15 @@ class SetupBacktester:
                 state = trailing.pop(trade.ticket, None)
                 moved = state is not None and state.stage != "initial" and trade.exit_reason == "sl"
                 reason = state.stage if moved else trade.exit_reason                # breakeven / trailing
+                financing = (self.costs.swap_per_lot_night * trade.volume
+                             * financing_nights(trade.entry_time, trade.exit_time))
+                if financing:
+                    broker.balance -= financing                     # même solde que la courbe d'équité
                 trades.append(SetupTrade(entry_time=trade.entry_time, exit_time=trade.exit_time,
                                          entry_price=trade.entry_price, exit_price=trade.exit_price,
                                          stop_loss=trade.sl, take_profit=trade.tp, volume=trade.volume,
                                          exit_reason=reason, ambiguous=trade.ambiguous,
-                                         profit=trade.profit, symbol=self.symbol, **info))
+                                         profit=round(trade.profit - financing, 2), symbol=self.symbol, **info))
 
         for i in range(len(exec_frame) - 1):
             now = (exec_frame.index[i] + duration).to_pydatetime()       # clôture de la bougie i
@@ -372,6 +410,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--balance", type=float, default=10_000.0)
     parser.add_argument("--slippage", type=int, default=1, help="glissement en points")
     parser.add_argument("--spread", type=int, default=None, help="spread fixe en points (défaut : historique)")
+    parser.add_argument("--commission", type=float, default=0.0, help="commission par lot (aller-retour)")
+    parser.add_argument("--swap", type=float, default=0.0, help="financement payé par lot et par nuit (devise du compte)")
+    parser.add_argument("--folds", type=int, default=4, help="périodes successives de la validation walk-forward")
     parser.add_argument("--strategies", default=None,
                         help=f"liste séparée par des virgules parmi : {', '.join(SETUP_STRATEGIES)} (défaut : SETUP_STRATEGIES)")
     parser.add_argument("--out", type=Path, default=REPORTS_DIR, help="dossier du rapport JSON (dashboard)")
@@ -379,15 +420,29 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    m15, specs = load_mt5(args.symbol, args.bars, "M15")
-    h1, _ = load_mt5(args.symbol, args.bars // 4 + 400, "H1")
-    costs = CostModel(args.spread, args.slippage)
     names = [n.strip() for n in args.strategies.split(",")] if args.strategies else None
-    result = SetupBacktester(setup_strategies(names), args.symbol, {"H1": h1, "M15": m15},
-                             specs, args.balance, costs, bar_timezone=mt5_server_timezone()).run()
-    print(f"Backtest setups {args.symbol} · {m15.index[0]:%Y-%m-%d} → {m15.index[-1]:%Y-%m-%d}")
+    strategies = setup_strategies(names)
+    # même période pour tous les timeframes : `--bars` bougies M15, plus l'historique de préchauffage
+    span = args.bars * TIMEFRAME_SECONDS["M15"]
+    frames, specs = {}, None
+    for timeframe in sorted({tf for s in strategies for tf in s.timeframes}, key=TIMEFRAME_SECONDS.get):
+        count = span // TIMEFRAME_SECONDS[timeframe] + max(s.bars for s in strategies)
+        frames[timeframe], specs = load_mt5(args.symbol, min(count, MAX_LOADED_BARS), timeframe)
+    costs = CostModel(args.spread, args.slippage, args.commission, args.swap)
+    result = SetupBacktester(strategies, args.symbol, frames, specs, args.balance, costs,
+                             bar_timezone=mt5_server_timezone()).run()
+    finest = frames[min(frames, key=TIMEFRAME_SECONDS.get)]
+    print(f"Backtest setups {args.symbol} · {finest.index[0]:%Y-%m-%d} → {finest.index[-1]:%Y-%m-%d}")
     print(result.summary())
-    print(f"Rapport : {save_report(result.to_report(args.symbol, costs), args.out)}")
+    report = result.to_report(args.symbol, costs, args.folds)
+    walk = report["walk_forward"]
+    for fold in walk.get("folds", []):
+        print(f"Période {fold['period']} ({fold['role']}, {fold['start'][:10]} → {fold['end'][:10]}) : "
+              f"{fold['trades']} trades, {fold['net_profit']:+.2f}, {fold['expectancy_r']:+.2f} R")
+    if walk.get("consistency_pct") is not None:
+        print(f"Walk-forward : {walk['out_of_sample_positive']}/{walk['out_of_sample_traded']} périodes futures "
+              f"positives ({walk['consistency_pct']:.0f} %)")
+    print(f"Rapport : {save_report(report, args.out)}")
     return 0
 
 

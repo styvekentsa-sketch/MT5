@@ -19,7 +19,7 @@ from utils.database import MAX_PAGE_SIZE, Database, get_database
 router = APIRouter(prefix="/api/history", tags=["Historique"], dependencies=[Depends(require_api_key)])
 
 DecisionStatus = Literal["traded", "hold", "news_blocked", "cooldown", "rejected", "failed", "error",
-                         "managed", "kill_switch", "memory_blocked", "trade_closed"]
+                         "managed", "kill_switch", "memory_blocked", "trade_closed", "suspended"]
 # Décisions considérées comme des « trades » (exécutés ou tentés)
 TRADE_STATUSES = ("traded", "rejected", "failed")
 

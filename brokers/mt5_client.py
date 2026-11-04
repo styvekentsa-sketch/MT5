@@ -899,9 +899,18 @@ def modify_position_stops(ticket: int, sl: float | None, tp: float | None) -> Or
         return OrderResult(False, "", "MODIFY", 0.0, sl=sl, tp=tp, ticket=ticket, message=str(exc))
 
 
-def close_position(ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
+def _closing_volume(info: Any, position_volume: float, volume: float | None) -> float:
+    """Volume à fermer : tout, ou `volume` arrondi au pas ; un reliquat sous le minimum est fermé avec."""
+    if volume is None or volume >= position_volume:
+        return position_volume
+    lots = _normalize_volume(info, volume)
+    return position_volume if position_volume - lots < info.volume_min - 1e-9 else lots
+
+
+def close_position(ticket: int, comment: str = "Bot Close", force: bool = False,
+                   volume: float | None = None) -> OrderResult:
     """
-    Clôture entièrement une position ouverte par son ticket.
+    Clôture une position ouverte par son ticket : entièrement, ou `volume` lots (clôture partielle).
     `force=True` envoie une clôture réelle même en mode PAPER (kill-switch d'urgence).
     """
     try:
@@ -924,17 +933,18 @@ def close_position(ticket: int, comment: str = "Bot Close", force: bool = False)
             is_buy = pos.type == mt5.POSITION_TYPE_BUY
             side = "SELL" if is_buy else "BUY"
             price = tick.bid if is_buy else tick.ask
+            lots = _closing_volume(info, pos.volume, volume)
 
             if is_dry_run() and not force:
-                log.info("[DRY RUN] Clôture simulée #%d : %s %.2f %s @ %s (P/L actuel %.2f)",
-                         ticket, side, pos.volume, pos.symbol, price, pos.profit)
-                return OrderResult(True, pos.symbol, side, pos.volume, price, ticket=ticket,
+                log.info("[DRY RUN] Clôture simulée #%d : %s %.2f / %.2f %s @ %s (P/L actuel %.2f)",
+                         ticket, side, lots, pos.volume, pos.symbol, price, pos.profit)
+                return OrderResult(True, pos.symbol, side, lots, price, ticket=ticket,
                                    retcode=mt5.TRADE_RETCODE_DONE, message="simulation", dry_run=True)
 
             request: dict[str, Any] = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": pos.symbol,
-                "volume": pos.volume,
+                "volume": lots,
                 "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
                 "position": ticket,
                 "price": price,
@@ -944,8 +954,8 @@ def close_position(ticket: int, comment: str = "Bot Close", force: bool = False)
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": _filling_mode(info),
             }
-            log.info("Clôture de la position #%d (%s %.2f, P/L %.2f)",
-                     ticket, pos.symbol, pos.volume, pos.profit)
+            log.info("Clôture de la position #%d (%s %.2f / %.2f, P/L %.2f)",
+                     ticket, pos.symbol, lots, pos.volume, pos.profit)
             return _send_order(request, side, pos.symbol)
 
     except (MT5ConnectionError, ValueError) as exc:

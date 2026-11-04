@@ -4,6 +4,12 @@ miroir par strategies/base.py).
 
 Contexte (timeframe de contexte, H1 par défaut, bougies clôturées) :
   - détecteur de régime causal : ni choc de volatilité, ni tendance opposée à la cassure
+  - filtre de contexte H1 (h1_context_reason, chaque règle désactivable) ; setup invalidé avec le
+    motif « Contexte H1 invalide : ... » si :
+      * ADX(14) H1 < STRATEGY_MOMENTUM_MIN_H1_ADX (22) : marché amorphe
+      * le plus haut des STRATEGY_MOMENTUM_H1_LOOKBACK (20) dernières bougies H1 est au-dessus de
+        l'entrée, à moins de STRATEGY_MOMENTUM_H1_OBSTACLE_ATR (1.0) ATR H1 : obstacle non franchi
+      * EMA 50 <= EMA 200 en H1 (STRATEGY_MOMENTUM_H1_EMA_ALIGNMENT) : tendance de fond contraire
 Niveau clé et cassure (timeframe de déclenchement, M15 par défaut) :
   1. niveau clé = plus haut des 40 bougies précédant la bougie de cassure (sommet du range récent :
      tout pivot confirmé de la fenêtre est à ce niveau ou en dessous)
@@ -43,6 +49,7 @@ chacune est analysée et le meilleur statut est retenu (prêt > surveillance > i
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 
 import numpy as np
@@ -78,6 +85,7 @@ _RANK = {SetupStatus.READY: 0, SetupStatus.WATCHING: 1, SetupStatus.INVALIDATED:
 # Fenêtres de forte liquidité institutionnelle, en UTC : [début, fin)
 LIQUIDITY_SESSIONS = (("Londres", time(7, 0), time(10, 0)), ("New York", time(12, 30), time(16, 0)))
 OFF_SESSION = "Hors session de liquidité"
+H1_INVALID = "Contexte H1 invalide"
 
 
 def liquidity_session(at: datetime) -> str | None:
@@ -90,6 +98,35 @@ def liquidity_session(at: datetime) -> str | None:
 
 def _sessions_text() -> str:
     return ", ".join(f"{name} {start:%H:%M}-{end:%H:%M}" for name, start, end in LIQUIDITY_SESSIONS) + " UTC"
+
+
+def h1_context_reason(ctx: pd.DataFrame, reading: RegimeReading, entry: float) -> str | None:
+    """
+    Filtre de contexte H1 d'un ACHAT (une vente est jugée sur la série miroir), sur les bougies
+    H1 clôturées : force de tendance (ADX 14), obstacle H1 immédiat, alignement des EMA. Motif de
+    rejet (mots {...} adaptés au sens par strategies/base.py), ou None si le contexte est valide.
+    """
+    cfg = settings.strategy
+    if cfg.momentum_min_h1_adx > 0 and (reading.adx is None or reading.adx < cfg.momentum_min_h1_adx):
+        adx = "indisponible" if reading.adx is None else f"{reading.adx:.1f}"
+        return f"{H1_INVALID} : Marché amorphe (ADX H1 {adx} < {cfg.momentum_min_h1_adx:g})"
+    if cfg.momentum_h1_obstacle_atr > 0 and reading.atr:
+        obstacle = float(ctx["high"].iloc[-cfg.momentum_h1_lookback:].max())
+        room = (obstacle - entry) / reading.atr
+        if 0 < room < cfg.momentum_h1_obstacle_atr:              # au-dessus de l'entrée, pas encore franchi
+            return (f"{H1_INVALID} : obstacle H1 immédiat ({{sommet}} des {cfg.momentum_h1_lookback} dernières "
+                    f"bougies H1 à {room:.2f} ATR H1 de l'entrée, marge minimale {cfg.momentum_h1_obstacle_atr:g})")
+    if cfg.momentum_h1_ema_alignment:
+        if len(ctx) < cfg.momentum_h1_ema_slow:
+            return (f"{H1_INVALID} : historique H1 insuffisant pour l'EMA {cfg.momentum_h1_ema_slow} "
+                    f"({len(ctx)} bougies)")
+        closes = ctx["close"].astype(float)
+        fast = float(closes.ewm(span=cfg.momentum_h1_ema_fast, adjust=False).mean().iloc[-1])
+        slow = float(closes.ewm(span=cfg.momentum_h1_ema_slow, adjust=False).mean().iloc[-1])
+        if fast <= slow:
+            return (f"{H1_INVALID} : tendance de fond contraire (EMA {cfg.momentum_h1_ema_fast} {{sous}} "
+                    f"EMA {cfg.momentum_h1_ema_slow} en H1)")
+    return None
 
 
 class MomentumBreakoutStrategy(BaseStrategy):
@@ -159,7 +196,13 @@ class MomentumBreakoutStrategy(BaseStrategy):
             if plan is not None:
                 plans.append(plan)
         # meilleur statut ; à statut égal, la cassure la plus récente (dernière de la liste)
-        return min(reversed(plans), key=lambda p: _RANK[p.status], default=None)
+        best = min(reversed(plans), key=lambda p: _RANK[p.status], default=None)
+        if best is None or best.status not in (SetupStatus.READY, SetupStatus.WATCHING):
+            return best
+        reason = h1_context_reason(ctx, reading, best.entry)
+        if reason is None:
+            return best
+        return replace(best, status=SetupStatus.INVALIDATED, notes=(*best.notes, reason))
 
     def _follow(self, bars: dict[str, np.ndarray], j: int, level: float, atr: float, quote: Quote | None,
                 reading: RegimeReading, restarts: set[int]) -> BuyPlan | None:

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, errorMessage, scopedConnection, type ApiError, type Connection } from "./api/client";
-import type { MT5LoginRequest } from "./api/types";
+import type { AnalysisSetup, MT5LoginRequest } from "./api/types";
 import { AccountOverview } from "./components/AccountOverview";
 import { AccountsBar } from "./components/AccountsBar";
 import { ConnectionBanner } from "./components/ConnectionBanner";
@@ -8,6 +8,7 @@ import { ControlPanel } from "./components/ControlPanel";
 import { CycleOutcomes } from "./components/CycleOutcomes";
 import { DecisionJournal, type DecisionFilter } from "./components/DecisionJournal";
 import { MT5LoginDialog } from "./components/MT5LoginDialog";
+import { MarketContextPanel } from "./components/MarketContextPanel";
 import { DataFeedsPage } from "./components/data/DataFeedsPage";
 import { LearningPanel } from "./components/data/LearningPanel";
 import { MobileNav, type Tab } from "./components/MobileNav";
@@ -239,6 +240,23 @@ export default function App() {
       return result.message;
     });
 
+  /** Bouton « Exécuter ce setup en Live » : confirmation visuelle ou motif du refus (serveur / broker). */
+  const { refresh: refreshSetups } = setups;
+  const handleExecuteSetup = async (setup: AnalysisSetup) => {
+    try {
+      const result = await api.executeSetup(scoped, setup.id);
+      push(
+        "success",
+        `${result.message} · ${result.volume} lot @ ${result.price} · SL ${result.sl} · TP ${result.tp}`,
+      );
+    } catch (error) {
+      push("error", `${setup.symbol} ${setup.strategy} : ${errorMessage(error)}`);
+    } finally {
+      refreshSetups();
+      refreshLive();
+    }
+  };
+
   const handleSave = (next: Connection) => {
     save(next);
     setSettingsOpen(false);
@@ -345,7 +363,11 @@ export default function App() {
             currency={account.data?.currency ?? "USD"}
             lastUpdated={setups.lastUpdated}
             onRefresh={setups.refresh}
+            onExecute={apiConnected ? handleExecuteSetup : undefined}
           />
+        )}
+        {onAnalysisView && (
+          <MarketContextPanel connection={scoped} symbols={status.data?.symbols ?? []} active={enabled && onAnalysisView} />
         )}
         {onAnalysisView && (
           <PerformancePanel
@@ -380,6 +402,7 @@ export default function App() {
                 symbols={status.data?.symbols ?? []}
                 positions={positions.data}
                 setups={setups.data?.setups}
+                onShowSetups={() => changeTab("analysis")}
                 active={enabled && onTradingView && (isWide || tab === "positions")}
               />
             </div>

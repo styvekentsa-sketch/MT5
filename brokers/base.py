@@ -140,8 +140,12 @@ class BaseBroker(ABC):
         """Ouvre une position au marché (simulée en mode PAPER)."""
 
     @abstractmethod
-    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
-        """Ferme une position. `force=True` : clôture réelle même en PAPER (kill-switch)."""
+    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False,
+                    volume: float | None = None) -> OrderResult:
+        """
+        Ferme une position, ou seulement `volume` (clôture partielle, arrondie au pas du broker ;
+        le reliquat sous le volume minimal est fermé avec). `force=True` : clôture réelle même en PAPER.
+        """
 
     def diagnose_symbol(self, symbol: str, entry: float | None = None,
                         sl: float | None = None) -> SymbolDiagnostic | None:

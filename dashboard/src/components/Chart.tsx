@@ -177,12 +177,14 @@ interface ChartProps {
   positions: Position[] | null;
   /** Setups proposés (mode analyste) : entrée, SL et TP du symbole affiché sont tracés en pointillés */
   setups?: AnalysisSetup[] | null;
+  /** Clic sur le badge « setups proposés » : ouvrir le panneau des setups (exécution) */
+  onShowSetups?: () => void;
   /** False quand le graphique n'est pas à l'écran : aucune requête */
   active: boolean;
 }
 
 /** Graphique en bougies des symboles suivis, mis à jour en direct depuis l'API du bot. */
-export function PriceChart({ connection, symbols, positions, setups = null, active }: ChartProps) {
+export function PriceChart({ connection, symbols, positions, setups = null, onShowSetups, active }: ChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -495,9 +497,16 @@ export function PriceChart({ connection, symbols, positions, setups = null, acti
             </span>
           )}
           {symbolSetups.length > 0 && (
-            <span className="rounded border border-sky-500/40 px-1.5 py-0.5 text-[11px] text-sky-200">
+            <button
+              type="button"
+              onClick={onShowSetups}
+              disabled={!onShowSetups}
+              title="Voir les setups et le bouton d'exécution (onglet Analyse)"
+              className="rounded border border-sky-500/40 px-1.5 py-0.5 text-[11px] text-sky-200 enabled:hover:bg-sky-500/15"
+            >
               {symbolSetups.length} setup{symbolSetups.length > 1 ? "s" : ""} proposé{symbolSetups.length > 1 ? "s" : ""}
-            </span>
+              {onShowSetups && " →"}
+            </button>
           )}
         </div>
         {quote && (

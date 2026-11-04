@@ -145,6 +145,14 @@ class BaseStrategy(ABC):
     validity_bars: int = 3
     #: Fuseau des étiquettes de bougies (None : UTC réel) : fixé par le broker (analyze) ou le backtest
     bar_timezone = None
+    #: Ratio net minimal exigé par le vérificateur indépendant (None : RISK_MIN_NET_REWARD_RISK)
+    min_net_reward_risk: float | None = None
+    #: Moteur (trades d'opportunité) : nom affiché, étiquette du commentaire d'ordre, indicateur identifiant
+    #: un signal (un seul trade par valeur)
+    label: str = "Setup"
+    role: str = ""                   # rôle affiché dans les logs et le dashboard (stratégies d'opportunité)
+    order_tag: str = "SETUP"
+    anchor: str = "entry"
     #: Gestion de la position ouverte (backtest) : breakeven / trailing stop (risk/trailing.py), ou None
     trailing: TrailingStop | None = None
 
@@ -277,7 +285,7 @@ class BaseStrategy(ABC):
         if not check.get("is_approved"):
             notes.append(f"risque : {check.get('reason')}")
         verdict = verify_order(setup.symbol, setup.side.value, setup.entry_price, setup.stop_loss, setup.take_profit,
-                               broker)
+                               broker, min_ratio=self.min_net_reward_risk)
         if not verdict.approved:
             notes.append(f"vérificateur indépendant : {verdict.reason}")
         if len(notes) > len(setup.notes):

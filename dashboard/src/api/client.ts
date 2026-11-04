@@ -9,8 +9,11 @@ import type {
   ClosedPosition,
   ControlResult,
   DataFeeds,
+  EventCards,
+  ExecuteSetupResult,
   Indicators,
   KillSwitchResult,
+  MarketStructureReport,
   ModeResult,
   PerformanceReport,
   Position,
@@ -183,12 +186,27 @@ export const api = {
   /** Mode analyste : setups des stratégies (analyse complète côté serveur, mise en cache 15 s) */
   setups: (c: Connection, signal?: AbortSignal) =>
     request<SetupsReport>(c, "/api/analysis/setups", { signal, timeoutMs: 60_000 }),
+  /** Exécute un setup prêt en LIVE (ordre réel au marché, tout est revérifié côté serveur) */
+  executeSetup: (c: Connection, setupId: string) =>
+    request<ExecuteSetupResult>(c, `/api/analysis/setups/${encodeURIComponent(setupId)}/execute`, {
+      method: "POST",
+      timeoutMs: 30_000,
+    }),
   /** Mode analyste : ATR, ADX, pivots confirmés, supports / résistances et régime (bougies clôturées) */
   indicators: (c: Connection, symbol: string, timeframe: string, count: number, signal?: AbortSignal) =>
     request<Indicators>(
       c,
       `/api/analysis/indicators?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&count=${count}`,
       { signal },
+    ),
+  /** Mode analyste : fiches des annonces (direction, intensité, confiance, validité, action proposée) */
+  events: (c: Connection, signal?: AbortSignal) => request<EventCards>(c, "/api/analysis/events", { signal }),
+  /** Mode analyste : BOS / CHoCH, FVG, Order Blocks, niveaux, Bollinger et contexte D1 / H4 / H1 */
+  structure: (c: Connection, symbol: string, timeframe: string, signal?: AbortSignal) =>
+    request<MarketStructureReport>(
+      c,
+      `/api/analysis/structure?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,
+      { signal, timeoutMs: 30_000 },
     ),
   /** Mode analyste : statistiques par stratégie (trades clos et rapports de backtest) */
   performance: (c: Connection, signal?: AbortSignal) =>

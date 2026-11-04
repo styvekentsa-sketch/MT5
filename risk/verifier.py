@@ -62,9 +62,15 @@ def _losing_streak(deals) -> int:
     return streak
 
 
-def verify_order(symbol: str, side: str, entry: float, sl: float, tp: float | None, broker) -> Verdict:
-    """Vérification indépendante d'un ordre (ou d'un setup) ; `approved` False au moindre doute."""
+def verify_order(symbol: str, side: str, entry: float, sl: float, tp: float | None, broker,
+                 min_ratio: float | None = None) -> Verdict:
+    """
+    Vérification indépendante d'un ordre (ou d'un setup) ; `approved` False au moindre doute.
+    `min_ratio` : ratio net minimal propre à la stratégie (petits trades : objectif court) ; par défaut
+    RISK_MIN_NET_REWARD_RISK. Toutes les autres règles sont identiques pour toutes les stratégies.
+    """
     risk = settings.risk
+    minimum = risk.min_net_reward_risk if min_ratio is None else min_ratio
     failures: list[str] = []
     checks: dict[str, bool] = {}
     values: dict = {}
@@ -84,9 +90,9 @@ def verify_order(symbol: str, side: str, entry: float, sl: float, tp: float | No
             ratio = net_reward_risk(side_enum, entry, sl, tp, cost=spread)
             values["net_reward_risk"] = round(ratio, 3)
             # tolérance : un TP calculé exactement au ratio minimal donne 2.4999999 en virgule flottante
-            checks["ratio_net"] = ratio >= risk.min_net_reward_risk - RATIO_TOLERANCE
+            checks["ratio_net"] = ratio >= minimum - RATIO_TOLERANCE
             if not checks["ratio_net"]:
-                failures.append(f"ratio net estimé {ratio:.2f} < {risk.min_net_reward_risk:g}")
+                failures.append(f"ratio net estimé {ratio:.2f} < {minimum:g}")
 
         # 2. Spread : distance au stop, médiane 60 minutes, plafond de l'actif
         distance = abs(entry - sl)

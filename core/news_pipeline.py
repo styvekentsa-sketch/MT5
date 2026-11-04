@@ -19,6 +19,10 @@ Pipeline des actualités et du calendrier économique, et fenêtre de sécurité
    fiabilité, actifs concernés, surprise (réel vs consensus), effet potentiel par actif et horizon,
    conséquence sur les setups en cours (validé / invalidé / neutre). Analyse déterministe par règles ;
    un analyseur par LLM pourrait implémenter la même interface (`analyze_event` / `analyze_article`).
+   Chaque fiche porte aussi l'heure de réception, l'intensité (faible / moyenne / forte), une
+   confiance (à calibrer sur l'historique), sa durée de validité et l'action proposée
+   (autoriser, attendre, bloquer, réévaluer). Les mots-clés orientent l'analyse, ils ne déclenchent
+   jamais un ordre : la décision reste au moteur et au module de risque.
 """
 
 from __future__ import annotations
@@ -104,6 +108,19 @@ class Horizon(str, Enum):
     DAYS = "jours"
 
 
+class Intensity(str, Enum):
+    LOW = "faible"
+    MEDIUM = "moyenne"
+    HIGH = "forte"
+
+
+class Action(str, Enum):
+    ALLOW = "autoriser"
+    WAIT = "attendre"
+    BLOCK = "bloquer"
+    REASSESS = "réévaluer"
+
+
 class Surprise(BaseModel):
     actual: float
     consensus: float
@@ -138,6 +155,12 @@ class NewsAnalysis(BaseModel):
     horizon: Horizon
     setup_impacts: list[SetupImpact] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    received_at: datetime | None = Field(None, description="Heure de réception par le bot (UTC)")
+    intensity: Intensity = Intensity.LOW
+    confidence: float = Field(0.0, ge=0, le=1, description="Confiance de l'analyse, à calibrer")
+    valid_until: datetime | None = Field(None, description="Fin de la période où le signal reste exploitable")
+    action: Action = Action.ALLOW
+    action_reason: str = ""
 
 
 # =============================================================================
@@ -207,6 +230,10 @@ HIGH_RELIABILITY = ("reuters", "bloomberg", "wall street journal", "wsj", "finan
 MEDIUM_RELIABILITY = ("fxstreet", "investing", "marketwatch", "cnbc", "nasdaq", "yahoo", "fxempire", "investinglive")
 LONG_HORIZON = ("rate decision", "interest rate", "monetary policy", "cash rate", "fomc", "taux directeur", "policy")
 SURPRISE_FULL_STRENGTH = 0.20         # écart de 20 % du consensus = effet maximal
+RELIABILITY_CONFIDENCE = {Reliability.HIGH: 0.9, Reliability.MEDIUM: 0.7, Reliability.LOW: 0.4}
+ARTICLE_MODEL_CONFIDENCE = 0.6        # sentiment par lexique : moins sûr qu'un chiffre publié
+HORIZON_VALIDITY = {Horizon.MINUTES: timedelta(minutes=30), Horizon.HOURS: timedelta(hours=4),
+                    Horizon.DAYS: timedelta(days=2)}
 _NUMBER = re.compile(r"(-?\d+(?:[.,]\d+)?)\s*([kKmMbBtT%]?)")
 _MULTIPLIERS = {"k": 1e3, "m": 1e6, "b": 1e9, "t": 1e12}
 
@@ -243,6 +270,50 @@ def _currency_sign_on(symbol: str, currency: str) -> int:
     return -1                                              # devise de cotation (EURUSD : USD, XAUUSD : USD)
 
 
+def _intensity(strength: float) -> Intensity:
+    return Intensity.HIGH if strength >= 0.66 else Intensity.MEDIUM if strength >= 0.33 else Intensity.LOW
+
+
+def classify(analysis: NewsAnalysis, now: datetime | None = None, importance: Importance | None = None,
+             received_at: datetime | None = None) -> NewsAnalysis:
+    """
+    Intensité, validité et action proposée :
+      - annonce pas encore publiée (ou sans résultat) : attendre si l'importance est forte ou moyenne
+      - signal périmé (au-delà de sa validité) : autoriser, il n'influence plus rien
+      - un setup en cours va à contre-sens d'un effet moyen ou fort : réévaluer
+      - effet fort encore frais : bloquer les nouvelles entrées le temps que le marché digère
+    """
+    now = now or datetime.now(timezone.utc)
+    analysis.received_at = received_at or analysis.received_at or now
+    strength = max((e.strength for e in analysis.effects.values()), default=0.0)
+    published = analysis.published_at
+    pending = analysis.kind == "calendrier" and analysis.surprise is None
+    if pending and importance is not None:
+        analysis.intensity = {Importance.HIGH: Intensity.HIGH, Importance.MEDIUM: Intensity.MEDIUM}.get(
+            importance, Intensity.LOW)
+    else:
+        analysis.intensity = _intensity(strength)
+    base = RELIABILITY_CONFIDENCE[analysis.reliability]
+    analysis.confidence = round(base * (0.5 if pending else 1.0 if analysis.kind == "calendrier"
+                                        else ARTICLE_MODEL_CONFIDENCE), 2)
+    start = published or analysis.received_at
+    analysis.valid_until = start + HORIZON_VALIDITY[analysis.horizon]
+
+    contrary = [i for i in analysis.setup_impacts if i.verdict == "invalidé"]
+    if now > analysis.valid_until:
+        analysis.action, analysis.action_reason = Action.ALLOW, "signal périmé : plus d'influence attendue"
+    elif pending and analysis.intensity != Intensity.LOW:
+        analysis.action, analysis.action_reason = Action.WAIT, "résultat pas encore publié"
+    elif contrary and analysis.intensity != Intensity.LOW:
+        analysis.action = Action.REASSESS
+        analysis.action_reason = f"{len(contrary)} setup(s) à contre-sens de l'effet attendu"
+    elif analysis.intensity == Intensity.HIGH and published and now - published <= timedelta(minutes=15):
+        analysis.action, analysis.action_reason = Action.BLOCK, "effet fort encore frais : volatilité attendue"
+    else:
+        analysis.action, analysis.action_reason = Action.ALLOW, "effet faible ou compatible avec les setups"
+    return analysis
+
+
 def setup_consequence(analysis: NewsAnalysis, setup: TradingSetup) -> SetupImpact:
     """Validation (effet dans le sens du setup), invalidation (effet contraire) ou neutre."""
     effect = analysis.effects.get(setup.symbol)
@@ -256,7 +327,8 @@ def setup_consequence(analysis: NewsAnalysis, setup: TradingSetup) -> SetupImpac
                               f"{'dans le sens' if favourable else 'à contre-sens'} du setup {setup.side.value}")
 
 
-def analyze_event(event: CalendarEvent, setups: Iterable[TradingSetup] = ()) -> NewsAnalysis:
+def analyze_event(event: CalendarEvent, setups: Iterable[TradingSetup] = (), now: datetime | None = None,
+                  received_at: datetime | None = None) -> NewsAnalysis:
     """Annonce du calendrier : surprise réel vs consensus, effet sur chaque actif exposé, horizon."""
     actual, consensus = parse_value(event.actual), parse_value(event.consensus)
     notes, surprise, effects = [], None, {}
@@ -288,11 +360,11 @@ def analyze_event(event: CalendarEvent, setups: Iterable[TradingSetup] = ()) -> 
                             reliability=source_reliability(event.source), assets=list(event.assets),
                             surprise=surprise, effects=effects, horizon=horizon, notes=notes)
     analysis.setup_impacts = [setup_consequence(analysis, s) for s in setups]
-    return analysis
+    return classify(analysis, now, event.importance, received_at)
 
 
 def analyze_article(article: Any, symbols: Iterable[str] | None = None,
-                    setups: Iterable[TradingSetup] = ()) -> NewsAnalysis:
+                    setups: Iterable[TradingSetup] = (), now: datetime | None = None) -> NewsAnalysis:
     """Article d'actualité : sentiment orienté par actif (règles du moteur de sentiment), fiabilité de la source."""
     from sentiment.sentiment_analyzer import article_insights
 
@@ -311,7 +383,7 @@ def analyze_article(article: Any, symbols: Iterable[str] | None = None,
                             horizon=Horizon.DAYS if any(w in text for w in LONG_HORIZON) else Horizon.HOURS,
                             notes=[f"mots-clés : {', '.join(insights['keywords'])}"] if insights["keywords"] else [])
     analysis.setup_impacts = [setup_consequence(analysis, s) for s in setups]
-    return analysis
+    return classify(analysis, now, received_at=getattr(article, "received_at", None))
 
 
 _SOURCE_SUFFIX = re.compile(r"\s+[-–—|]\s+[^-–—|]{2,40}$")   # « Titre - Reuters » (agrégateurs)
@@ -361,6 +433,7 @@ class NewsPipeline:
         self.available = True
         self.errors: dict[str, str] = {}
         self._alerted: set[str] = set()
+        self.received: dict[str, datetime] = {}          # clé de l'annonce -> première réception (UTC)
 
     # ------------------------------------------------------------------ calendrier fusionné
 
@@ -392,6 +465,9 @@ class NewsPipeline:
                             field: getattr(event, field) for field in ("actual", "consensus", "previous")
                             if getattr(current, field) is None and getattr(event, field) is not None})
             self.available = ok > 0 or not self.providers
+            received = datetime.now(timezone.utc)
+            for key, event in merged.items():                # le résultat publié est une nouvelle réception
+                self.received.setdefault(f"{key}|{event.actual}", received)
             result = sorted((e.model_copy(update={"assets": tuple(s for s in self.symbols
                                                                   if e.currency in symbol_currencies(s))})
                              for e in merged.values()), key=lambda e: e.time)
@@ -427,6 +503,19 @@ class NewsPipeline:
             fresh = [k for k in block.keys if k not in self._alerted]
             self._alerted.update(block.keys)
             return bool(fresh)
+
+    def received_at(self, event: CalendarEvent) -> datetime | None:
+        return self.received.get(f"{event.key}|{event.actual}")
+
+    def cards(self, setups: Iterable[TradingSetup] = (), now: datetime | None = None,
+              hours_before: float = 6, hours_after: float = 12) -> list[NewsAnalysis]:
+        """Fiches structurées des annonces suivies proches de `now` (actifs suivis exposés uniquement)."""
+        now = now or datetime.now(timezone.utc)
+        setups = list(setups)
+        window = [e for e in self.events() if e.assets and e.importance != Importance.LOW
+                  and now - timedelta(hours=hours_before) <= e.time <= now + timedelta(hours=hours_after)]
+        return [analyze_event(e, [s for s in setups if s.symbol in e.assets], now, self.received_at(e))
+                for e in window]
 
     def upcoming(self, symbol: str, now: datetime | None = None) -> list[CalendarEvent]:
         block = self.safety_check(symbol, now)

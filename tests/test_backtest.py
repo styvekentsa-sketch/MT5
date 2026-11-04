@@ -459,3 +459,31 @@ def test_real_strategies_run_on_simulated_history():
     assert isinstance(result.stats.trades, int)
     for trade in result.trades:
         assert trade.entry_time >= trade.signal_time and trade.planned_net_ratio >= 3 - 1e-6
+
+
+# ----------------------------------------------------------------- walk-forward et financement
+
+def test_financing_nights_triple_on_wednesday():
+    from backtesting.setup_engine import financing_nights
+    monday = datetime(2026, 11, 2, 10)
+    assert financing_nights(monday, monday + timedelta(hours=5)) == 0
+    assert financing_nights(monday, monday + timedelta(days=1)) == 1
+    assert financing_nights(monday, monday + timedelta(days=3)) == 1 + 1 + 3          # lundi, mardi, mercredi
+
+
+def test_swap_cost_reduces_profit_and_equity_stays_consistent():
+    free = _run()
+    paid = _run(costs=CostModel(slippage_points=0, swap_per_lot_night=50.0))
+    held = [t for t in paid.trades if t.exit_time.date() > t.entry_time.date()]
+    assert held, "le scénario doit contenir des trades gardés une nuit"
+    assert paid.stats.net_profit < free.stats.net_profit
+    assert paid.equity.iloc[-1] == pytest.approx(10_000 + paid.stats.net_profit, abs=0.05)
+
+
+def test_walk_forward_periods_cover_all_trades():
+    result = _run()
+    walk = result.walk_forward(3)
+    assert [f["role"] for f in walk["folds"]] == ["référence", "hors échantillon", "hors échantillon"]
+    assert sum(f["trades"] for f in walk["folds"]) == len(result.trades)
+    assert walk["out_of_sample_traded"] <= 2 and result.walk_forward(1) == {}
+    assert result.to_report("EURUSD", CostModel(), folds=3)["walk_forward"]["folds"][0]["period"] == 1

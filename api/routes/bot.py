@@ -23,11 +23,11 @@ router = APIRouter(prefix="/api/bot", tags=["Moteur"], dependencies=[Depends(req
 MAX_DECISIONS = 200
 ACCEPTED_STATUSES = ("traded",)
 REJECTED_STATUSES = ("hold", "news_blocked", "cooldown", "rejected", "failed", "error", "memory_blocked")
-ACTION_STATUSES = ("managed", "kill_switch", "trade_closed")
+ACTION_STATUSES = ("managed", "kill_switch", "trade_closed", "suspended")
 STAGES = {
     "traded": "exécution", "hold": "signal", "news_blocked": "calendrier", "cooldown": "cooldown",
     "rejected": "risque", "failed": "broker", "error": "erreur", "managed": "gestion", "kill_switch": "sécurité",
-    "memory_blocked": "mémoire", "trade_closed": "post-mortem",
+    "memory_blocked": "mémoire", "trade_closed": "post-mortem", "suspended": "sécurité",
 }
 
 

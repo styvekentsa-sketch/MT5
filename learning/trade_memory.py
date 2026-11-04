@@ -285,8 +285,14 @@ class TradeMemory:
 
     def record_entry(self, result: OrderResult, decision: dict[str, Any], features: dict[str, Any]) -> dict[str, Any]:
         """Instantané complet de la position ouverte (journal d'entrée)."""
+        from utils.versioning import rules_version
+
         side = result.order_type
         labels = pattern_labels(side, features)
+        planned = decision.get("entry_price")
+        slippage = None                                  # prix exécuté - prix prévu ; > 0 = défavorable
+        if planned and result.price:
+            slippage = round((result.price - planned) * (1 if side == "BUY" else -1), 8)
         with self._lock:
             trades = self.trades.load()
             entry = {
@@ -297,9 +303,13 @@ class TradeMemory:
                 "side": side,
                 "volume": result.volume,
                 "entry_price": result.price,
+                "planned_entry": planned,
+                "slippage": slippage,
+                "rules_version": rules_version(),
                 "sl": result.sl,
                 "tp": result.tp,
                 "mode": decision.get("mode"),
+                "strategy": decision.get("strategy"),            # impulsion, petits_trades, momentum_breakout...
                 "reason": decision.get("verdict") or decision.get("reason", ""),
                 "features": features,
                 "pattern": pattern_key(result.symbol, decision.get("mode"), side, labels),

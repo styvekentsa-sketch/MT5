@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable
 
@@ -28,6 +29,8 @@ class FakeBroker(BaseBroker):
         self.margin_fn: Callable[..., float | None] | None = None
         self.orders: list[dict[str, Any]] = []
         self.closed: list[tuple[int, bool]] = []
+        self.closed_volumes: list[tuple[int, float | None, str]] = []
+        self.modified: list[tuple[int, float | None, float | None]] = []
         self.order_ok = True
         self.close_ok: Callable[[int], bool] = lambda ticket: True
         self.position_deals: dict[int, list[ClosedDeal]] = {}
@@ -59,10 +62,12 @@ class FakeBroker(BaseBroker):
         return OrderResult(self.order_ok, symbol, side, volume, price=1.1, sl=sl, tp=tp, ticket=-1,
                            message="" if self.order_ok else "refusé par le broker", dry_run=True)
 
-    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
+    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False,
+                    volume: float | None = None) -> OrderResult:
         self.closed.append((ticket, force))
+        self.closed_volumes.append((ticket, volume, comment))
         ok = self.close_ok(ticket)
-        return OrderResult(ok, "EURUSD", "CLOSE", 0.5, ticket=ticket, message="" if ok else "marché fermé")
+        return OrderResult(ok, "EURUSD", "CLOSE", volume or 0.5, ticket=ticket, message="" if ok else "marché fermé")
 
     def get_historical_data(self, symbol: str, count: int = 100, timeframe: str | None = None) -> pd.DataFrame:
         return self.bars
@@ -78,3 +83,9 @@ class FakeBroker(BaseBroker):
 
     def calc_margin(self, side: str, symbol: str, volume: float, price: float) -> float | None:
         return self.margin_fn(side, symbol, volume, price) if self.margin_fn else None
+
+    def modify_stops(self, ticket: int, sl: float | None, tp: float | None) -> OrderResult:
+        self.modified.append((ticket, sl, tp))
+        self.positions = [replace(p, sl=p.sl if sl is None else sl, tp=p.tp if tp is None else tp)
+                          if p.ticket == ticket else p for p in self.positions]
+        return OrderResult(True, "EURUSD", "MODIFY", 0.0, sl=sl, tp=tp, ticket=ticket)

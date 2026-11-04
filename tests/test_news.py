@@ -223,3 +223,42 @@ def test_duplicate_press_releases_are_kept_once():
                 SimpleNamespace(title="ECB cuts rates", source="FXStreet", published=ANNOUNCE)]
     kept = dedupe_articles(articles)
     assert [a.source for a in kept] == ["Reuters", "FXStreet"]                       # le premier publié est gardé
+
+
+# ----------------------------------------------------------------- fiche d'événement : intensité, validité, action
+
+def test_event_card_before_publication_says_wait():
+    card = analyze_event(_analysed(consensus="180K"), now=ANNOUNCE - timedelta(minutes=10))
+    assert card.intensity.value == "forte" and card.action.value == "attendre"
+    assert card.confidence == pytest.approx(0.45)                     # source fiable, résultat inconnu
+    assert card.received_at is not None and card.valid_until == ANNOUNCE + timedelta(hours=4)
+
+
+def test_strong_surprise_blocks_then_expires():
+    event = _analysed(actual="250K", consensus="180K")
+    fresh = analyze_event(event, now=ANNOUNCE + timedelta(minutes=5))
+    assert fresh.intensity.value == "forte" and fresh.action.value == "bloquer" and fresh.confidence == 0.9
+    later = analyze_event(event, now=ANNOUNCE + timedelta(hours=1))
+    assert later.action.value == "autoriser"
+    expired = analyze_event(event, now=ANNOUNCE + timedelta(hours=5))
+    assert expired.action.value == "autoriser" and "périmé" in expired.action_reason
+
+
+def test_contrary_setup_asks_for_reassessment():
+    buy = TradingSetup(symbol="EURUSD", side=Side.BUY, style=TradingStyle.DAY, strategy="test", entry_price=1.1,
+                       stop_loss=1.098, take_profit=1.107)
+    card = analyze_event(_analysed(actual="250K", consensus="180K"), [buy], now=ANNOUNCE + timedelta(minutes=30))
+    assert card.action.value == "réévaluer" and "contre-sens" in card.action_reason
+
+
+def test_article_card_is_less_confident_than_a_published_figure():
+    article = SimpleNamespace(title="Euro surges as ECB signals more rate hikes", snippet="", source="Reuters",
+                              published=ANNOUNCE, received_at=ANNOUNCE + timedelta(seconds=40))
+    card = analyze_article(article, symbols=["EURUSD"], now=ANNOUNCE + timedelta(minutes=1))
+    assert card.confidence == pytest.approx(0.54) and card.received_at == ANNOUNCE + timedelta(seconds=40)
+
+
+def test_pipeline_cards_record_reception_time():
+    pipeline = _pipeline(_event(actual="250K", consensus="180K"), _event(title="Retail Sales", importance="low"))
+    [card] = pipeline.cards(now=ANNOUNCE + timedelta(minutes=5))      # importance faible exclue
+    assert card.received_at is not None and card.action.value == "bloquer"

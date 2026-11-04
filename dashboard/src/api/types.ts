@@ -27,6 +27,33 @@ export interface Status {
   last_cycle_at: string | null;
   last_cycle_duration_seconds: number | null;
   last_outcomes: Outcome[];
+  /** Trades d'opportunité actifs quand la stratégie principale dit HOLD (absent sur une ancienne version) */
+  opportunities?: OpportunityMode[];
+  /** Latence par étape (actualités, analyse, risque, ordre, tour), en ms */
+  latency?: Record<string, LatencyStats>;
+  /** Motif de suspension des nouvelles entrées (drawdown), null sinon */
+  suspension?: string | null;
+  /** Empreinte des règles appliquées et commit du code */
+  rules_version?: string;
+}
+
+export interface LatencyStats {
+  last_ms: number;
+  avg_ms: number;
+  p95_ms: number;
+  max_ms: number;
+  count: number;
+}
+
+export interface OpportunityMode {
+  name: string;
+  /** Impulsion, Petits trades */
+  label: string;
+  /** Ce que le mode cherche, son stop et son objectif */
+  role: string;
+  timeframe: string;
+  /** Symboles autorisés (OPPORTUNITY_SYMBOLS) */
+  symbols: string[];
 }
 
 export type AccountType = "demo" | "real" | "contest" | "paper" | "unknown";
@@ -402,6 +429,14 @@ export interface RiskLimits {
   max_total_risk_pct: number;
   max_open_positions: number;
   deals_today: number;
+  /** Baisse des fonds propres depuis leur plus haut, en % (absent sur une ancienne version) */
+  drawdown_pct?: number | null;
+  /** 0 = suspension désactivée */
+  max_drawdown_pct?: number;
+  drawdown_reached?: boolean;
+  max_currency_risk_pct?: number;
+  /** Risque au stop cumulé par devise et par sens (corrélation), en % du capital */
+  currency_exposure?: { exposure: string; risk_pct: number | null }[];
 }
 
 export type SetupStatus = "surveillance" | "prêt" | "expiré" | "invalidé";
@@ -427,6 +462,69 @@ export interface AnalysisSetup {
   notes: string[];
   pros: string[];
   cons: string[];
+  /** Déjà envoyé depuis le dashboard (bouton « Exécuter ce setup en Live ») */
+  executed: boolean;
+  /** TP1 / TP2 des sorties partielles (null si désactivées) et TP3 = TP de l'ordre */
+  take_profits?: { tp1: number | null; tp2: number | null; tp3: number | null };
+}
+
+/** GET /api/analysis/events : fiche structurée d'une annonce économique */
+export interface EventCard {
+  kind: string;
+  fact: string;
+  published_at: string | null;
+  received_at: string | null;
+  source: string;
+  reliability: "élevée" | "moyenne" | "faible";
+  assets: string[];
+  surprise: { actual: number; consensus: number; difference: number; relative_pct: number | null; direction: string } | null;
+  effects: Record<string, { direction: "haussier" | "baissier" | "neutre"; strength: number }>;
+  horizon: string;
+  setup_impacts: { setup_id: string; symbol: string; side: "BUY" | "SELL"; verdict: string; reason: string }[];
+  notes: string[];
+  intensity: "faible" | "moyenne" | "forte";
+  confidence: number;
+  valid_until: string | null;
+  action: "autoriser" | "attendre" | "bloquer" | "réévaluer";
+  action_reason: string;
+}
+
+export interface EventCards {
+  generated_at: string;
+  calendar_available: boolean;
+  events: EventCard[];
+}
+
+export type Trend = "haussier" | "baissier" | "range";
+
+export interface StructureZone {
+  kind: string;
+  direction: "haussier" | "baissier";
+  low: number;
+  high: number;
+  time: string;
+  active: boolean;
+}
+
+/** GET /api/analysis/structure */
+export interface MarketStructureReport {
+  symbol: string;
+  timeframe: string;
+  summary: string;
+  trend: Trend;
+  last_break: { kind: "BOS" | "CHoCH"; direction: "haussier" | "baissier"; level: number; time: string } | null;
+  breaks: { kind: "BOS" | "CHoCH"; direction: "haussier" | "baissier"; level: number; time: string }[];
+  fair_value_gaps: StructureZone[];
+  order_blocks: StructureZone[];
+  levels: { kind: "support" | "résistance"; price: number; touches: number; liquidity: boolean }[];
+  bollinger: { upper?: number; middle?: number; lower?: number; regime?: string; width_percentile?: number; position?: string };
+  atr: number | null;
+  notes: string[];
+  context: {
+    dominant: Trend | "mixte";
+    aligned: boolean;
+    timeframes: Record<string, { direction: Trend; reason: string }>;
+  };
 }
 
 export interface SetupsReport {
@@ -435,6 +533,23 @@ export interface SetupsReport {
   min_net_reward_risk: number;
   setups: AnalysisSetup[];
   errors: string[];
+  /** Exécution manuelle possible (mode LIVE, compte démo) ; sinon le motif */
+  execution: { allowed: boolean; reason: string | null };
+}
+
+/** POST /api/analysis/setups/{id}/execute */
+export interface ExecuteSetupResult {
+  success: boolean;
+  message: string;
+  setup_id: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  ticket: number;
+  volume: number;
+  price: number;
+  sl: number;
+  tp: number;
+  checks: string[];
 }
 
 export interface SwingPivotOut {

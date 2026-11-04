@@ -5,6 +5,7 @@ limites de risque, setups avec arguments pour / contre, indicateurs, performance
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -227,3 +228,179 @@ def test_console_channel_writes_text():
     stream = io.StringIO()
     ConsoleChannel(stream).send("ℹ️ [MT5 Bot] Setup validé")
     assert stream.getvalue() == "ℹ️ [MT5 Bot] Setup validé\n"
+
+
+# ----------------------------------------------------------------- exécution manuelle d'un setup (bouton Live)
+
+from dataclasses import replace as _replace  # noqa: E402
+
+from brokers import base as broker_base  # noqa: E402
+from brokers.models import OrderResult, Tick  # noqa: E402
+from core import manual_execution  # noqa: E402
+from core.manual_execution import account_block, execute_setup  # noqa: E402
+
+
+def _eurusd_profit(side, symbol, volume, price_open, price_close):
+    diff = price_close - price_open if side == "BUY" else price_open - price_close
+    return round(diff / 0.00001 * volume, 2)
+
+
+@pytest.fixture
+def live_broker(account, eurusd_specs):
+    """Compte DÉMO en mode LIVE ; place_order renvoie un ordre réel (non simulé)."""
+    fake = FakeBroker()
+    fake.account = _replace(account, account_type="demo", currency="USD")
+    fake.specs = {"EURUSD": eurusd_specs}
+    fake.ticks = {"EURUSD": Tick("EURUSD", 1.10000, 1.10002, 0.0, 2, datetime.now(timezone.utc))}
+    fake.profit_fn = _eurusd_profit
+    fake.margin_fn = lambda *a: 100.0
+
+    def place_order(symbol, side, volume, sl=None, tp=None, comment="Bot Order"):
+        fake.orders.append({"symbol": symbol, "action": side, "volume": volume, "sl": sl, "tp": tp, "comment": comment})
+        return OrderResult(True, symbol, side, volume, price=1.10002, sl=sl, tp=tp, ticket=777, dry_run=False)
+    fake.place_order = place_order
+    broker_base.set_dry_run(False)
+    manual_execution._executed.clear()
+    yield fake
+    broker_base.set_dry_run(True)                                  # ne jamais laisser le mode LIVE actif
+    manual_execution._executed.clear()
+
+
+def _ready(**changes) -> TradingSetup:
+    now = datetime.now(timezone.utc)
+    return _setup(**{"entry_price": 1.10002, "stop_loss": 1.09802, "take_profit": 1.10702, "notes": [],
+                     "indicators": {"atr": 0.0010, "adx": 30.0}, "created_at": now,
+                     "expires_at": now + timedelta(minutes=15), **changes})
+
+
+def test_execution_sends_the_setup_levels_with_a_recomputed_size(live_broker):
+    result = execute_setup(_ready(), live_broker)
+    assert result.success and result.ticket == 777, result.message
+    [order] = live_broker.orders
+    assert (order["symbol"], order["action"], order["sl"], order["tp"]) == ("EURUSD", "BUY", 1.09802, 1.10702)
+    assert 0 < order["volume"] <= 0.5 + 1e-9                       # 1 % de 10 000 pour 200 points de stop
+    assert order["comment"].startswith("Setup manuel")
+
+
+def test_the_same_setup_cannot_be_sent_twice(live_broker):
+    setup = _ready()
+    assert execute_setup(setup, live_broker).success
+    second = execute_setup(setup, live_broker)
+    assert not second.success and "déjà exécuté" in second.message and len(live_broker.orders) == 1
+
+
+@pytest.mark.parametrize("change, needle", [
+    (lambda b: broker_base.set_dry_run(True), "mode PAPER"),
+    (lambda b: setattr(b, "account", _replace(b.account, account_type="real")), "compte RÉEL"),
+    (lambda b: setattr(b, "account", _replace(b.account, account_type="unknown")), "type de compte inconnu"),
+])
+def test_execution_requires_live_mode_on_a_demo_account(live_broker, change, needle):
+    change(live_broker)
+    assert needle in account_block(live_broker)
+    result = execute_setup(_ready(), live_broker)
+    assert not result.success and result.code == "refused" and needle in result.message
+    assert live_broker.orders == []
+
+
+def test_real_account_needs_an_explicit_opt_in(live_broker, monkeypatch):
+    live_broker.account = _replace(live_broker.account, account_type="real")
+    allowed = _replace(settings.risk, allow_manual_real_account=True)
+    monkeypatch.setattr(manual_execution, "settings", SimpleNamespace(risk=allowed))
+    assert account_block(live_broker) is None
+
+
+@pytest.mark.parametrize("setup_changes, tick, needle", [
+    ({"status": SetupStatus.WATCHING}, None, "seul un setup prêt"),
+    ({"expires_at": datetime.now(timezone.utc) - timedelta(minutes=1)}, None, "expiré"),
+    ({}, (1.10050, 1.10052), "le prix a bougé"),                  # +0.5 ATR depuis l'analyse
+    ({"indicators": {}}, (1.09790, 1.09792), "hors des niveaux"),  # prix déjà sous le stop
+])
+def test_execution_refuses_stale_or_invalid_setups(live_broker, setup_changes, tick, needle):
+    if tick:
+        live_broker.ticks["EURUSD"] = Tick("EURUSD", tick[0], tick[1], 0.0, 2, datetime.now(timezone.utc))
+    result = execute_setup(_ready(**setup_changes), live_broker)
+    assert not result.success and needle in result.message and live_broker.orders == []
+
+
+def test_execution_is_refused_by_the_independent_verifier(live_broker):
+    result = execute_setup(_ready(take_profit=1.10402), live_broker)                # ratio net ~2 < 3
+    assert not result.success and "vérificateur indépendant" in result.message and live_broker.orders == []
+
+
+def test_broker_rejection_is_reported(live_broker):
+    live_broker.place_order = lambda *a, **k: OrderResult(False, "EURUSD", "BUY", 0.5, message="marché fermé")
+    result = execute_setup(_ready(), live_broker)
+    assert not result.success and result.code == "broker_error" and "marché fermé" in result.message
+
+
+def test_execute_route_end_to_end(live_broker, tmp_path, monkeypatch):
+    monkeypatch.setattr(analysis, "REPORTS_DIR", tmp_path / "reports")
+    analysis._cache.clear()
+    analysis._proposed.clear()
+    setup = _ready()
+    monkeypatch.setattr(analysis, "_strategies", lambda: [SimpleNamespace(
+        name="pullback", analyze=lambda broker, symbol, now: setup if symbol == "EURUSD" else None)])
+    client = TestClient(create_app(TradingEngine(symbols=["EURUSD"], broker=live_broker)))
+
+    listing = client.get("/api/analysis/setups", headers=AUTH).json()
+    assert listing["execution"] == {"allowed": True, "reason": None}
+    assert listing["setups"][0]["id"] == setup.id and listing["setups"][0]["executed"] is False
+
+    assert client.post("/api/analysis/setups/inconnu/execute", headers=AUTH).status_code == 404
+    assert client.post(f"/api/analysis/setups/{setup.id}/execute").status_code == 401        # clé API requise
+    done = client.post(f"/api/analysis/setups/{setup.id}/execute", headers=AUTH)
+    assert done.status_code == 200 and done.json()["ticket"] == 777 and done.json()["sl"] == 1.09802
+    again = client.post(f"/api/analysis/setups/{setup.id}/execute", headers=AUTH)
+    assert again.status_code == 409 and "déjà exécuté" in again.json()["detail"]
+    assert client.get("/api/analysis/setups", headers=AUTH).json()["setups"][0]["executed"] is True
+
+    broker_base.set_dry_run(True)
+    paper = client.get("/api/analysis/setups", headers=AUTH).json()["execution"]
+    assert paper["allowed"] is False and "mode PAPER" in paper["reason"]
+
+
+def test_execute_route_reports_broker_errors_as_502(live_broker, monkeypatch):
+    analysis._proposed.clear()
+    setup = _ready()
+    analysis._proposed[setup.id] = setup
+    live_broker.place_order = lambda *a, **k: OrderResult(False, "EURUSD", "BUY", 0.5, message="requote")
+    client = TestClient(create_app(TradingEngine(symbols=["EURUSD"], broker=live_broker)))
+    response = client.post(f"/api/analysis/setups/{setup.id}/execute", headers=AUTH)
+    assert response.status_code == 502 and "requote" in response.json()["detail"]
+
+
+def test_execute_route_runs_in_the_threadpool():
+    """Route synchrone : FastAPI l'exécute dans un thread, l'appel MT5 ne bloque pas la boucle de l'API."""
+    import inspect
+    assert not inspect.iscoroutinefunction(analysis.execute_proposed_setup)
+
+
+# ----------------------------------------------------------------- drawdown, corrélation, annonces
+
+def test_risk_limits_report_drawdown_and_currency_exposure(client, broker, tmp_path):
+    from brokers.models import POSITION_TYPE_BUY, Position
+    from risk.drawdown import DrawdownMonitor
+    client.engine.drawdown = DrawdownMonitor(tmp_path / "peaks.json")
+    client.engine.drawdown.peaks[DrawdownMonitor.key(broker.account)] = 12_500.0
+    broker.profit_fn = lambda side, symbol, volume, o, c: round((c - o if side == "BUY" else o - c) / 0.00001 * volume, 2)
+    broker.positions = [Position(ticket=1, symbol="EURUSD", type=POSITION_TYPE_BUY, volume=0.5, price_open=1.1,
+                                 price_current=1.1, sl=1.098, tp=1.106, profit=0, swap=0, time=0,
+                                 magic=settings.trading.magic_number)]
+    body = client.get("/api/analysis/risk", headers=AUTH).json()
+    assert body["drawdown_pct"] == pytest.approx(20.0) and body["max_currency_risk_pct"] == 1.5
+    assert {e["exposure"] for e in body["currency_exposure"]} == {"EUR acheteur", "USD vendeur"}
+    assert body["currency_exposure"][0]["risk_pct"] == pytest.approx(1.0)
+
+
+def test_event_cards_endpoint(client, monkeypatch):
+    from core import news_pipeline as npl
+    from core.news_pipeline import NewsPipeline, SimulatedCalendarProvider
+    soon = datetime.now(timezone.utc) + timedelta(minutes=20)
+    pipeline = NewsPipeline([SimulatedCalendarProvider([{"time": soon.isoformat(), "title": "CPI m/m", "currency": "USD",
+                                                         "importance": "high", "consensus": "0.3%"}])],
+                            symbols=["EURUSD"], cache_seconds=0)
+    monkeypatch.setattr(npl, "_pipeline", pipeline)
+    body = client.get("/api/analysis/events", headers=AUTH).json()
+    [card] = body["events"]
+    assert card["action"] == "attendre" and card["intensity"] == "forte" and card["received_at"]
+    assert body["calendar_available"] is True

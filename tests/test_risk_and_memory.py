@@ -90,10 +90,25 @@ def _open_position(ticket, risk_pips, sl=True):
 
 def test_cumulative_cap_reduces_size(broker):
     broker.positions = [_open_position(1, risk_pips=30)]           # 0.5 lot x 30 pips = 150 de risque ouvert
-    result = size_position("EURUSD", 1.1000, 1.0980, broker)       # budget cumulé restant : 200 - 150 = 50
+    result = size_position("EURUSD", 1.1000, 1.1020, broker)       # budget cumulé restant : 200 - 150 = 50
     assert result.open_risk == pytest.approx(150) and result.cumulative_budget_left == pytest.approx(50)
-    assert result.volume == pytest.approx(0.25) and result.limited_by == "risque cumulé"
+    assert result.volume == pytest.approx(0.25) and result.limited_by == "risque cumulé"   # vente : pas corrélée
     assert result.volume * result.loss_per_lot + result.open_risk <= 0.02 * 10_000 + 1e-9
+
+
+def test_correlated_exposure_reduces_size_in_the_same_direction(broker):
+    broker.positions = [_open_position(1, risk_pips=20)]           # achat EURUSD : EUR acheteur / USD vendeur, 100
+    same = size_position("EURUSD", 1.1000, 1.0980, broker)          # limite par devise 1.5 % = 150 : reste 50
+    assert same.volume == pytest.approx(0.25) and same.limited_by.startswith("exposition corrélée")
+    opposite = size_position("EURUSD", 1.1000, 1.1020, broker)      # sens inverse : seule la limite cumulée joue
+    assert opposite.volume == pytest.approx(0.5) and opposite.limited_by == "risque par position"
+
+
+def test_currency_exposure_of_gold_and_pairs():
+    from risk.risk_manager import currency_exposure
+    assert currency_exposure("EURUSD", "BUY") == {"EUR": 1, "USD": -1}
+    assert currency_exposure("XAUUSD", "BUY") == {"XAU": 1, "USD": -1}      # même sens USD qu'un achat EURUSD
+    assert currency_exposure("USDJPY", "SELL") == {"USD": -1, "JPY": 1}
 
 
 def test_cumulative_cap_reached_and_unbounded_positions(broker):

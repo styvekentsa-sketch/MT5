@@ -356,3 +356,12 @@ def test_ccxt_account_identity_is_normalised(paper_broker, live_broker):
     assert (paper.account_type, paper.name, paper.server) == ("paper", "Compte PAPER", "bybit · données publiques")
     live = live_broker.get_balance()
     assert live.account_type == "demo" and live.server == "bybit · demo" and live.name.startswith("Compte API")
+
+
+def test_mt5_broker_exposes_description_and_clock_as_properties():
+    """Régression : `description` redevenue une méthode cassait la sérialisation JSON de l'API (erreur 500)."""
+    import inspect
+
+    from brokers.mt5_broker import MT5Broker
+    for name in ("description", "bar_timezone"):
+        assert isinstance(inspect.getattr_static(MT5Broker, name), property), name

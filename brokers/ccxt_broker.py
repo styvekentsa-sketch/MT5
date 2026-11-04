@@ -593,7 +593,8 @@ class CCXTBroker(BaseBroker):
     def _fetch_positions_for(self, symbol: str) -> list[Position]:
         return [p for p in self._fetch_positions(bot_only=True) if p.symbol == symbol]
 
-    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
+    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False,
+                    volume: float | None = None) -> OrderResult:
         try:
             if ticket < 0 and is_dry_run():
                 log.info("[DRY RUN] Clôture simulée de la position fictive #%d", ticket)
@@ -602,18 +603,20 @@ class CCXTBroker(BaseBroker):
             if position is None:
                 raise ValueError(f"position #{ticket} introuvable")
             exit_side = "SELL" if position.type == POSITION_TYPE_BUY else "BUY"
+            amount = position.volume if volume is None else min(volume, position.volume)
             if is_dry_run() and not force:
-                log.info("[DRY RUN] Clôture simulée #%d : %s %s %s (P/L actuel %.2f)",
-                         ticket, exit_side, position.volume, position.symbol, position.profit)
-                return OrderResult(True, position.symbol, exit_side, position.volume, position.price_current,
+                log.info("[DRY RUN] Clôture simulée #%d : %s %s / %s %s (P/L actuel %.2f)",
+                         ticket, exit_side, amount, position.volume, position.symbol, position.profit)
+                return OrderResult(True, position.symbol, exit_side, amount, position.price_current,
                                    ticket=ticket, message="simulation", dry_run=True)
             market_symbol = self._resolve(position.symbol)["symbol"] if position.magic else position.symbol
             log.info("Clôture de la position #%d (%s %s, P/L %.2f) : %s",
                      ticket, position.symbol, position.volume, position.profit, comment)
             order = self._call(f"clôture {position.symbol}", self._exchange.create_order, market_symbol, "market",
-                               exit_side.lower(), position.volume, None, {"reduceOnly": True})
-            self._cancel_protective(market_symbol)
-            return OrderResult(True, position.symbol, exit_side, position.volume,
+                               exit_side.lower(), amount, None, {"reduceOnly": True})
+            if amount >= position.volume:                  # clôture partielle : les protections (reduceOnly) restent
+                self._cancel_protective(market_symbol)
+            return OrderResult(True, position.symbol, exit_side, amount,
                                float(order.get("average") or position.price_current), ticket=ticket,
                                order_id=str(order.get("id", "")), message="fermée")
         except (BrokerError, ValueError) as exc:

@@ -42,12 +42,12 @@ class MT5Broker(BaseBroker):
     supports_account_switch = True
 
     @property
-    @property
     def bar_timezone(self):
         from utils.server_time import mt5_server_timezone
 
         return mt5_server_timezone()
 
+    @property
     def description(self) -> str:
         creds = mt5_client.active_credentials()
         return f"MT5 {creds.login} @ {creds.server}"
@@ -123,8 +123,9 @@ class MT5Broker(BaseBroker):
             self._report(f"ordre {side} {symbol}", result.message)
         return result
 
-    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
-        result = mt5_client.close_position(ticket, comment=comment, force=force)
+    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False,
+                    volume: float | None = None) -> OrderResult:
+        result = mt5_client.close_position(ticket, comment=comment, force=force, volume=volume)
         if not result.success:
             self._report(f"clôture #{ticket}", result.message)
         return result

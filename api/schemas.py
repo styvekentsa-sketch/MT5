@@ -20,6 +20,14 @@ class OutcomeOut(BaseModel):
     detail: str = ""
 
 
+class OpportunityOut(BaseModel):
+    name: str
+    label: str = Field(description="Impulsion, Petits trades")
+    role: str = Field(description="Ce que le mode cherche, son stop et son objectif")
+    timeframe: str
+    symbols: list[str] = Field(description="Symboles autorisés (OPPORTUNITY_SYMBOLS)")
+
+
 class StatusOut(BaseModel):
     state: Literal["running", "paused", "stopped"] = Field(
         description="running = boucle active, paused = boucle active sans nouveaux trades, stopped = boucle arrêtée")
@@ -36,6 +44,13 @@ class StatusOut(BaseModel):
     last_cycle_at: datetime | None
     last_cycle_duration_seconds: float | None
     last_outcomes: list[OutcomeOut]
+    opportunities: list[OpportunityOut] = Field(default_factory=list,
+                                                description="Trades d'opportunité actifs quand la stratégie dit HOLD")
+    latency: dict[str, dict[str, float]] = Field(default_factory=dict,
+                                                 description="Latence par étape (ms) : actualités, analyse, risque, "
+                                                             "ordre, tour")
+    suspension: str | None = Field(None, description="Motif de suspension des nouvelles entrées (drawdown)")
+    rules_version: str = ""
 
 
 class AccountOut(BaseModel):

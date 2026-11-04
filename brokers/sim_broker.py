@@ -223,13 +223,18 @@ class SimBroker(BaseBroker):
                 profit = self.calc_profit(pos.side, pos.symbol, pos.volume, pos.price_open, price) or 0.0
                 self._positions[ticket] = replace(pos, price_current=price, profit=profit)
 
-    def _close(self, ticket: int, price: float, reason: str) -> float:
-        pos = self._positions.pop(ticket)
-        profit = self.calc_profit(pos.side, pos.symbol, pos.volume, pos.price_open, price) or 0.0
+    def _close(self, ticket: int, price: float, reason: str, volume: float | None = None) -> float:
+        pos = self._positions[ticket]
+        closed = pos.volume if volume is None or volume >= pos.volume - 1e-9 else volume
+        if closed < pos.volume:
+            self._positions[ticket] = replace(pos, volume=round(pos.volume - closed, 8))
+        else:
+            del self._positions[ticket]
+        profit = self.calc_profit(pos.side, pos.symbol, closed, pos.price_open, price) or 0.0
         self._balance = round(self._balance + profit, 2)
         self._deals.append(ClosedDeal(ticket=next(self._tickets), symbol=pos.symbol, time=self.now(), net_profit=profit,
                                       magic=pos.magic, position_id=ticket, price=price, reason=reason,
-                                      entry="out", volume=pos.volume))
+                                      entry="out", volume=closed))
         log.info("[SIMULATION] Position #%d %s %s fermée (%s) @ %s : %+.2f %s",
                  ticket, pos.side, pos.symbol, reason, price, profit, self.currency)
         return profit
@@ -282,15 +287,17 @@ class SimBroker(BaseBroker):
         log.info("[SIMULATION] %s %s %s @ %s | SL %s | TP %s | ticket #%d", side, volume, symbol, price, sl, tp, ticket)
         return OrderResult(True, symbol, side, volume, price, sl, tp, ticket=ticket, message="simulation", dry_run=True)
 
-    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False) -> OrderResult:
+    def close_order(self, ticket: int, comment: str = "Bot Close", force: bool = False,
+                    volume: float | None = None) -> OrderResult:
         with self._lock:
             pos = self._positions.get(ticket)
             if pos is None:
                 return OrderResult(False, "", "CLOSE", 0.0, ticket=ticket, message=f"position #{ticket} introuvable")
             tick = self.get_current_tick(pos.symbol)
             price = tick.bid if pos.type == POSITION_TYPE_BUY else tick.ask
-            self._close(ticket, price, "bot" if comment.startswith("Bot") else "manuel")
-        return OrderResult(True, pos.symbol, "CLOSE", pos.volume, price, ticket=ticket, message="fermée (simulation)",
+            closed = pos.volume if volume is None else min(volume, pos.volume)
+            self._close(ticket, price, "bot" if comment.startswith("Bot") else "manuel", closed)
+        return OrderResult(True, pos.symbol, "CLOSE", closed, price, ticket=ticket, message="fermée (simulation)",
                            dry_run=True)
 
     def modify_stops(self, ticket: int, sl: float | None, tp: float | None) -> OrderResult:

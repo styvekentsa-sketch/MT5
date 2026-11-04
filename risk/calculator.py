@@ -116,7 +116,7 @@ def loss_per_lot(broker, symbol: str, side: str, entry: float, sl: float, specs:
 
 def size_position(symbol: str, entry: float, sl: float, broker) -> SizingResult:
     """Volume maximal respectant le risque par position ET le risque cumulé, arrondi vers le bas au pas."""
-    from risk.risk_manager import open_positions_risk    # import local : risk_manager délègue à ce module
+    from risk.risk_manager import correlated_budget, open_positions_risk   # import local : risk_manager délègue ici
 
     if entry <= 0 or sl <= 0 or entry == sl:
         return SizingResult(0.0, reason="prix d'entrée ou stop invalides")
@@ -143,6 +143,9 @@ def size_position(symbol: str, entry: float, sl: float, broker) -> SizingResult:
         return SizingResult(0.0, reason=f"position(s) sans SL : risque cumulé non borné ({', '.join(unbounded)})", **base)
 
     budget, limited_by = (per_trade, "risque par position") if per_trade <= left else (left, "risque cumulé")
+    correlated, exposure = correlated_budget(symbol, side, capital, broker)
+    if correlated < budget:
+        budget, limited_by = correlated, f"exposition corrélée ({exposure})"
     raw = budget / per_lot
     min_volume, max_volume = volume_bounds(specs)
     if raw > max_volume:

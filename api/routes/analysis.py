@@ -3,6 +3,7 @@ Mode analyste dans le dashboard (LECTURE SEULE, aucun ordre) :
 
   - GET /api/analysis/risk         état des limites journalières (perte max, pertes consécutives)
   - GET /api/analysis/setups       propositions des stratégies à setups, arguments pour / contre
+  - POST /api/analysis/setups/{id}/execute   exécution manuelle d'un setup prêt (ordre réel, LIVE)
   - GET /api/analysis/indicators   ATR, ADX, pivots confirmés, supports / résistances, régime
   - GET /api/analysis/performance  statistiques par stratégie : trades réels clos et backtests
 """
@@ -13,7 +14,7 @@ import json
 import math
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,11 +28,16 @@ from backtesting.setup_engine import REPORTS_DIR, compute_stats
 from brokers.base import TIMEFRAME_NAMES as TIMEFRAMES
 from brokers.base import BaseBroker
 from config.settings import settings
+from core.manual_execution import account_block, execute_setup, was_executed
+from core.news_pipeline import get_pipeline
+from core.position_guard import exit_levels
 from core.regime_detector import adx, atr, confirmed_pivots, detect_regime, previous_session_pivots
 from learning.trade_memory import TradeMemory
 from models.schemas import SetupStatus, TradingSetup
-from risk.risk_manager import consecutive_losses, daily_loss_pct
+from risk.drawdown import DrawdownMonitor
+from risk.risk_manager import consecutive_losses, currency_risk, daily_loss_pct
 from strategies.base import closed_candles
+from strategies.market_structure import analyze_structure, multi_timeframe_context
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -42,8 +48,11 @@ SETUPS_CACHE_SECONDS = 15            # l'analyse complète (2 stratégies x symb
 NEAR_MIN_RATIO = 0.5                 # ratio net à moins de 0.5 du minimum : argument défavorable
 MAX_REPORTS = 20
 
+PROPOSED_RETENTION_MINUTES = 60      # setups prêts gardés en mémoire pour le bouton d'exécution
+
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _cache_lock = threading.Lock()
+_proposed: dict[str, TradingSetup] = {}  # setups prêts, par identifiant (l'exécution revérifie tout)
 
 
 def _symbol(symbol: str) -> str:
@@ -65,8 +74,11 @@ def _number(value: Any, digits: int = 6) -> float | None:
 # ----------------------------------------------------------------- limites de risque
 
 @router.get("/risk", summary="Limites de risque journalières")
-def risk_limits(broker: BaseBroker = Depends(get_active_broker)) -> dict[str, Any]:
-    """Perte du jour (réalisée + latente) et série de pertes du bot, comparées aux limites."""
+def risk_limits(request: Request, broker: BaseBroker = Depends(get_active_broker)) -> dict[str, Any]:
+    """
+    Perte du jour (réalisée + latente) et série de pertes du bot, drawdown depuis le plus haut des
+    fonds propres et exposition corrélée par devise, comparés aux limites.
+    """
     account = broker.get_account_info()
     if account is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Compte {broker.description} indisponible")
@@ -75,6 +87,13 @@ def risk_limits(broker: BaseBroker = Depends(get_active_broker)) -> dict[str, An
     loss = daily_loss_pct(account, deals)
     streak = consecutive_losses(deals)
     max_loss, max_streak = settings.risk.max_daily_loss_pct, settings.risk.max_consecutive_losses
+    engine = getattr(request.app.state, "engine", None)
+    monitor = engine.drawdown if engine is not None else DrawdownMonitor()
+    drawdown = monitor.update(account)
+    capital = min(account.balance, account.equity)
+    exposure = sorted(((f"{currency} {'acheteur' if sign > 0 else 'vendeur'}", amount / capital * 100)
+                       for (currency, sign), amount in currency_risk(broker).items()), key=lambda x: -x[1]) \
+        if capital > 0 else []
     return {
         "daily_loss_pct": _number(loss, 3),
         "max_daily_loss_pct": max_loss,
@@ -86,6 +105,11 @@ def risk_limits(broker: BaseBroker = Depends(get_active_broker)) -> dict[str, An
         "max_total_risk_pct": settings.risk.max_total_risk_pct,
         "max_open_positions": settings.risk.max_open_positions,
         "deals_today": len(deals),
+        "drawdown_pct": _number(drawdown, 3),
+        "max_drawdown_pct": settings.risk.max_drawdown_pct,
+        "drawdown_reached": settings.risk.max_drawdown_pct > 0 and drawdown >= settings.risk.max_drawdown_pct,
+        "max_currency_risk_pct": settings.risk.max_currency_risk_pct,
+        "currency_exposure": [{"exposure": label, "risk_pct": _number(pct, 3)} for label, pct in exposure],
     }
 
 
@@ -115,7 +139,8 @@ def arguments(setup: TradingSetup) -> tuple[list[str], list[str]]:
 def _setup_out(setup: TradingSetup) -> dict[str, Any]:
     pros, cons = arguments(setup)
     data = setup.model_dump(mode="json")
-    return {**data, "pros": pros, "cons": cons}
+    levels = exit_levels(setup.side.value, setup.entry_price, setup.stop_loss, setup.take_profit)
+    return {**data, "pros": pros, "cons": cons, "take_profits": levels}
 
 
 def _strategies() -> list:
@@ -136,7 +161,7 @@ def current_setups(request: Request, refresh: bool = Query(False, description="I
     with _cache_lock:
         cached = _cache.get(key)
         if cached and not refresh and time.monotonic() - cached[0] < SETUPS_CACHE_SECONDS:
-            return cached[1]
+            return _with_execution_state(cached[1], broker)
         now = datetime.now(timezone.utc)
         rows, errors = [], []
         strategies = _strategies()
@@ -150,12 +175,54 @@ def current_setups(request: Request, refresh: bool = Query(False, description="I
                     continue
                 if setup is not None:
                     rows.append(_setup_out(setup))
+                    if setup.status == SetupStatus.READY:
+                        _proposed[setup.id] = setup         # exécutable depuis le dashboard
         order = {SetupStatus.READY.value: 0, SetupStatus.WATCHING.value: 1}
         rows.sort(key=lambda s: (order.get(s["status"], 2), s["symbol"], s["strategy"]))
         result = {"generated_at": now.isoformat(timespec="seconds"), "broker": broker.description,
                   "min_net_reward_risk": settings.risk.min_net_reward_risk, "setups": rows, "errors": errors}
         _cache[key] = (time.monotonic(), result)
-        return result
+        _forget_expired(now)
+        return _with_execution_state(result, broker)
+
+
+def _with_execution_state(result: dict[str, Any], broker: BaseBroker) -> dict[str, Any]:
+    """État d'exécution recalculé à chaque appel (mode, compte, setups déjà exécutés), jamais mis en cache."""
+    try:
+        block = account_block(broker)
+    except Exception as exc:  # noqa: BLE001 - l'affichage des setups ne dépend pas du compte
+        block = f"compte indisponible ({type(exc).__name__})"
+    return {**result, "execution": {"allowed": block is None, "reason": block},
+            "setups": [{**s, "executed": was_executed(s["id"])} for s in result["setups"]]}
+
+
+def _forget_expired(now: datetime) -> None:
+    for setup_id, setup in list(_proposed.items()):
+        if setup.expires_at is not None and setup.expires_at < now - timedelta(minutes=PROPOSED_RETENTION_MINUTES):
+            del _proposed[setup_id]
+
+
+@router.post("/setups/{setup_id}/execute", summary="Exécuter un setup proposé en LIVE (ordre réel au marché)")
+def execute_proposed_setup(setup_id: str, request: Request,
+                           broker: BaseBroker = Depends(get_active_broker)) -> dict[str, Any]:
+    """
+    Envoie l'ordre du setup `setup_id` (proposé par GET /setups) après revérification complète au
+    prix actuel (core/manual_execution.py). 404 : setup inconnu ; 409 : refusé par une règle de
+    sécurité (mode PAPER, compte réel, expiré, prix parti, risque...) ; 502 : refusé par le broker.
+    """
+    setup = _proposed.get(setup_id)
+    if setup is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"Setup {setup_id} inconnu ou plus proposé : relancez l'analyse")
+    engine = getattr(request.app.state, "engine", None)
+    result = execute_setup(setup, broker, memory=getattr(engine, "memory", None))
+    if result.code == "refused":
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Ordre non envoyé : {result.message}")
+    if not result.success:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, result.message)
+    return {"success": True, "message": result.message, "setup_id": setup_id, "symbol": setup.symbol,
+            "side": setup.side.value, "ticket": result.ticket, "volume": result.volume, "price": result.price,
+            "sl": result.sl, "tp": result.tp, "checks": result.checks}
 
 
 # ----------------------------------------------------------------- indicateurs
@@ -200,6 +267,32 @@ def indicators(
         "structure": reading.structure.value,
         "reasons": list(reading.reasons),
     }
+
+
+@router.get("/events", summary="Fiches des annonces économiques : direction, intensité, confiance, validité, action")
+def event_cards(hours_before: float = Query(6, ge=0, le=48), hours_after: float = Query(12, ge=0, le=72)) -> dict[str, Any]:
+    """Annonces suivies autour de maintenant, croisées avec les setups prêts (validé / invalidé / neutre)."""
+    now = datetime.now(timezone.utc)
+    pipeline = get_pipeline()
+    cards = pipeline.cards(list(_proposed.values()), now, hours_before, hours_after)
+    return {"generated_at": now.isoformat(timespec="seconds"), "calendar_available": pipeline.available,
+            "events": [card.model_dump(mode="json") for card in cards]}
+
+
+@router.get("/structure", summary="Structure de marché : BOS / CHoCH, FVG, Order Blocks, niveaux, Bollinger, D1/H4/H1")
+def structure(
+    symbol: str = Query(...),
+    timeframe: str = Query("M15"),
+    count: int = Query(300, ge=120, le=1000),
+    broker: BaseBroker = Depends(get_active_broker),
+) -> dict[str, Any]:
+    """Bougies CLÔTURÉES uniquement ; zones et niveaux les plus proches du prix d'abord."""
+    symbol, timeframe = _symbol(symbol), timeframe.strip().upper()
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Timeframe invalide : {timeframe}")
+    reading = analyze_structure(broker.get_historical_data(symbol, count=count + 1, timeframe=timeframe))
+    return {"symbol": symbol, "timeframe": timeframe, "summary": reading.summary(), **reading.to_dict(),
+            "context": multi_timeframe_context(broker, symbol)}
 
 
 # ----------------------------------------------------------------- performances

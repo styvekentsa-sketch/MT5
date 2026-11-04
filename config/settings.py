@@ -46,7 +46,7 @@ VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 TRAILING_MODES = ("bars", "atr", "r")       # risk/trailing.py
 
 # Stratégies à setups disponibles (strategies/registry.py), choisies par SETUP_STRATEGIES
-SETUP_STRATEGY_NAMES = ("pullback", "range_rejet", "momentum_breakout")
+SETUP_STRATEGY_NAMES = ("pullback", "range_rejet", "momentum_breakout", "impulsion", "petits_trades")
 # Multiplicateur de la marge de protection b par actif (breakout momentum) : actifs à fortes mèches
 DEFAULT_MARGIN_MULTIPLIERS = "XAUUSD:1.5,XAGUSD:1.5"
 MAX_MARGIN_MULTIPLIER = 5.0
@@ -228,6 +228,9 @@ class RiskConfig:
     max_spread_sl_pct: float = 10.0  # spread maximal en % de la distance entrée - stop loss
     max_spread_median_ratio: float = 2.0   # spread maximal en multiple de sa médiane sur 60 minutes
     min_net_reward_risk: float = 3.0       # ratio net estimé minimal (vérificateur indépendant)
+    allow_manual_real_account: bool = False  # bouton « Exécuter en Live » autorisé sur un compte RÉEL
+    max_currency_risk_pct: float = 1.5     # risque cumulé exposé à une même devise dans le même sens (corrélation)
+    max_drawdown_pct: float = 10.0         # baisse depuis le plus haut des fonds propres : suspension (0 = aucune)
 
     def validate(self) -> None:
         if not 0 < self.risk_per_trade_pct <= 5:
@@ -258,6 +261,48 @@ class RiskConfig:
             raise ConfigError("RISK_MAX_SPREAD_MEDIAN_RATIO doit être >= 1")
         if not 0 < self.min_net_reward_risk <= 20:
             raise ConfigError("RISK_MIN_NET_REWARD_RISK doit être compris entre 0 et 20")
+        if not self.risk_per_trade_pct <= self.max_currency_risk_pct <= self.max_total_risk_pct:
+            raise ConfigError("RISK_MAX_CURRENCY_RISK_PCT doit être compris entre RISK_PER_TRADE_PCT et "
+                              "RISK_MAX_TOTAL_RISK_PCT (%)")
+        if not 0 <= self.max_drawdown_pct <= 50:
+            raise ConfigError("RISK_MAX_DRAWDOWN_PCT doit être compris entre 0 (désactivé) et 50 (%)")
+
+
+SHIELD_ACTIONS = ("none", "breakeven", "reduce", "close")
+
+
+@dataclass(frozen=True)
+class ExitConfig:
+    """Sorties partielles (TP1 / TP2, le TP du broker étant le TP final) et mode Bouclier sur annonce."""
+    tp1_r: float = 1.0                     # TP1 à 1 R du prix d'entrée
+    tp1_fraction: float = 0.0              # part du volume fermée au TP1 (0 = sorties partielles désactivées)
+    tp2_r: float = 2.0
+    tp2_fraction: float = 0.0              # part du volume INITIAL fermée au TP2 (0 = pas de TP2)
+    breakeven_after_tp1: bool = True       # stop ramené au prix d'entrée (+ spread) après le TP1
+    shield_action: str = "none"            # avant une annonce forte : none, breakeven, reduce, close
+    shield_reduce_fraction: float = 0.5
+    shield_close_contrary: bool = True     # fermer une position invalidée par une publication forte à contre-sens
+    shield_contrary_strength: float = 0.66 # force d'effet minimale pour juger le scénario invalidé
+
+    @property
+    def partial_exits(self) -> bool:
+        return self.tp1_fraction > 0
+
+    def validate(self) -> None:
+        if not 0 <= self.tp1_fraction < 1 or not 0 <= self.tp2_fraction < 1:
+            raise ConfigError("EXIT_TP1_FRACTION et EXIT_TP2_FRACTION doivent être compris entre 0 et 1 (exclu)")
+        if self.tp1_fraction + self.tp2_fraction >= 1:
+            raise ConfigError("EXIT_TP1_FRACTION + EXIT_TP2_FRACTION doit rester < 1 : le reste vise le TP final")
+        if self.tp2_fraction and not self.tp1_fraction:
+            raise ConfigError("EXIT_TP2_FRACTION exige un TP1 (EXIT_TP1_FRACTION > 0)")
+        if not 0 < self.tp1_r < self.tp2_r:
+            raise ConfigError("Contrainte non respectée : 0 < EXIT_TP1_R < EXIT_TP2_R")
+        if self.shield_action not in SHIELD_ACTIONS:
+            raise ConfigError(f"SHIELD_ACTION doit valoir {', '.join(SHIELD_ACTIONS)}")
+        if not 0 < self.shield_reduce_fraction < 1:
+            raise ConfigError("SHIELD_REDUCE_FRACTION doit être compris entre 0 et 1 (exclus)")
+        if not 0 < self.shield_contrary_strength <= 1:
+            raise ConfigError("SHIELD_CONTRARY_STRENGTH doit être compris entre 0 et 1")
 
 
 @dataclass(frozen=True)
@@ -332,6 +377,34 @@ class StrategyConfig:
     momentum_trailing_bars: int = 3
     momentum_trailing_atr: float = 1.5
     momentum_trailing_distance_r: float = 1.0
+    momentum_min_h1_adx: float = 22.0             # ADX(14) H1 minimal ; 0 = filtre désactivé
+    momentum_h1_lookback: int = 20                # bougies H1 pour l'obstacle (plus haut / plus bas)
+    momentum_h1_obstacle_atr: float = 1.0         # marge minimale jusqu'à l'obstacle H1, en ATR H1 ; 0 = désactivé
+    momentum_h1_ema_alignment: bool = True        # EMA rapide au-dessus de la lente pour acheter (inverse pour vendre)
+    momentum_h1_ema_fast: int = 50
+    momentum_h1_ema_slow: int = 200
+    # Impulsion (strategies/impulse.py) : rattrapage d'un mouvement violent et propre en cours
+    impulse_enabled: bool = False                 # le moteur ouvre ces trades quand sa stratégie dit HOLD
+    impulse_timeframe: str = "M15"
+    impulse_bars: int = 3
+    impulse_min_body_atr: float = 0.4
+    impulse_max_wick_pct: float = 35.0
+    impulse_min_move_atr: float = 1.5
+    impulse_max_move_atr: float = 4.0
+    impulse_sl_atr: float = 1.5
+    impulse_session_only: bool = True
+    # Petits trades / micro-scalping (strategies/micro_scalp.py) : objectif court, stop serré
+    scalp_enabled: bool = False                   # le moteur ouvre ces trades quand sa stratégie dit HOLD
+    scalp_tp_r: float = 1.2                       # ratio net visé (et exigé par le vérificateur pour CE mode)
+    scalp_sl_atr: float = 1.0
+    scalp_timeframe: str = "M5"
+    scalp_range_bars: int = 12
+    scalp_max_range_atr: float = 2.0
+    # Liste blanche des trades d'opportunité (impulsion, petits trades) ; vide = tous les symboles suivis
+    opportunity_symbols: tuple[str, ...] = ()
+
+    def opportunity_allowed(self, symbol: str) -> bool:
+        return not self.opportunity_symbols or symbol.upper() in self.opportunity_symbols
 
     def margin_multiplier(self, symbol: str) -> float:
         """Coefficient de la marge b pour `symbol` (1.0 : calcul standard)."""
@@ -363,6 +436,37 @@ class StrategyConfig:
             raise ConfigError("STRATEGY_MOMENTUM_TRAILING_ATR doit être compris entre 0.1 et 10")
         if not 0.1 <= self.momentum_trailing_distance_r <= 5:
             raise ConfigError("STRATEGY_MOMENTUM_TRAILING_DISTANCE_R doit être compris entre 0.1 et 5")
+        if not 0 <= self.momentum_min_h1_adx <= 60:
+            raise ConfigError("STRATEGY_MOMENTUM_MIN_H1_ADX doit être compris entre 0 (désactivé) et 60")
+        if not 5 <= self.momentum_h1_lookback <= 200:
+            raise ConfigError("STRATEGY_MOMENTUM_H1_LOOKBACK doit être compris entre 5 et 200")
+        if not 0 <= self.momentum_h1_obstacle_atr <= 10:
+            raise ConfigError("STRATEGY_MOMENTUM_H1_OBSTACLE_ATR doit être compris entre 0 (désactivé) et 10")
+        if not 1.0 <= self.scalp_tp_r <= 3.0:
+            raise ConfigError("STRATEGY_SCALP_TP_R doit être compris entre 1.0 et 3.0")
+        if not 0.3 <= self.scalp_sl_atr <= 3.0:
+            raise ConfigError("STRATEGY_SCALP_SL_ATR doit être compris entre 0.3 et 3.0 (stop loss obligatoire)")
+        if self.scalp_timeframe not in ("M1", "M5"):
+            raise ConfigError("STRATEGY_SCALP_TIMEFRAME doit valoir M1 ou M5")
+        if not 4 <= self.scalp_range_bars <= 60:
+            raise ConfigError("STRATEGY_SCALP_RANGE_BARS doit être compris entre 4 et 60")
+        if not 0.5 <= self.scalp_max_range_atr <= 10:
+            raise ConfigError("STRATEGY_SCALP_MAX_RANGE_ATR doit être compris entre 0.5 et 10")
+        if self.impulse_timeframe not in ("M5", "M15"):
+            raise ConfigError("IMPULSE_TIMEFRAME doit valoir M5 ou M15")
+        if not 2 <= self.impulse_bars <= 6:
+            raise ConfigError("IMPULSE_BARS doit être compris entre 2 et 6")
+        if not 0 < self.impulse_min_move_atr < self.impulse_max_move_atr <= 20:
+            raise ConfigError("IMPULSE_MIN_MOVE_ATR / IMPULSE_MAX_MOVE_ATR : 0 < minimum < maximum <= 20")
+        if not 0 <= self.impulse_min_body_atr <= 3:
+            raise ConfigError("IMPULSE_MIN_BODY_ATR doit être compris entre 0 et 3")
+        if not 0 < self.impulse_max_wick_pct <= 100:
+            raise ConfigError("IMPULSE_MAX_WICK_PCT doit être compris entre 0 (exclu) et 100")
+        if not 0.3 <= self.impulse_sl_atr <= 5:
+            raise ConfigError("IMPULSE_SL_ATR doit être compris entre 0.3 et 5 (stop loss obligatoire)")
+        if not 2 <= self.momentum_h1_ema_fast < self.momentum_h1_ema_slow <= 390:
+            raise ConfigError("STRATEGY_MOMENTUM_H1_EMA_FAST / _SLOW : 2 <= rapide < lente <= 390 "
+                              "(400 bougies H1 chargées)")
         for symbol, factor in self.margin_multipliers:
             if not 1.0 <= factor <= MAX_MARGIN_MULTIPLIER:
                 raise ConfigError(f"STRATEGY_MARGIN_MULTIPLIERS : coefficient de {symbol} hors de [1, "
@@ -499,6 +603,7 @@ class Settings:
     accounts: tuple[AccountSpec, ...] = ()     # non vide = superviseur multi-comptes
     adaptive: AdaptiveConfig = field(default_factory=lambda: AdaptiveConfig(((420, 600), (750, 930)), (420, 1200), 1230))
     learning: LearningConfig = field(default_factory=lambda: LearningConfig(False, BASE_DIR / "data" / "learning", 2, 0.6, 30))
+    exits: ExitConfig = field(default_factory=ExitConfig)
 
     @property
     def mode(self) -> str:
@@ -512,6 +617,10 @@ class Settings:
             self.broker.validate()
             if self.broker.type == "mt5":
                 self.mt5.validate()
+        untracked = [s for s in self.strategy.opportunity_symbols if s not in self.trading.symbols]
+        if untracked:
+            raise ConfigError(f"OPPORTUNITY_SYMBOLS : {', '.join(untracked)} absent(s) de TRADING_SYMBOLS "
+                              f"({', '.join(self.trading.symbols)})")
         if self.strategy.momentum_target_rr < self.risk.min_net_reward_risk:
             raise ConfigError(
                 f"STRATEGY_MOMENTUM_TARGET_RR ({self.strategy.momentum_target_rr:g}) < RISK_MIN_NET_REWARD_RISK "
@@ -519,7 +628,7 @@ class Settings:
                 "momentum ; abaisser aussi RISK_MIN_NET_REWARD_RISK pour tester un objectif plus proche")
         for section in (self.trading, self.risk, self.news,
                         self.sentiment, self.strategy, self.log, self.api, self.notifier,
-                        self.database, self.adaptive, self.learning):
+                        self.database, self.adaptive, self.learning, self.exits):
             section.validate()
 
     def summary(self) -> str:
@@ -533,7 +642,15 @@ class Settings:
             f"  Symboles        : {', '.join(self.trading.symbols)} ({self.trading.timeframe})",
             f"  Risque/trade    : {self.risk.risk_per_trade_pct}% | Perte max/jour : {self.risk.max_daily_loss_pct}%",
             f"  Positions max   : {self.risk.max_open_positions} (par symbole : {self.risk.max_positions_per_symbol})"
-            f" | risque cumulé max {self.risk.max_total_risk_pct}% | marge max {self.risk.max_margin_usage_pct}%",
+            f" | risque cumulé max {self.risk.max_total_risk_pct}% (par devise {self.risk.max_currency_risk_pct}%)"
+            f" | marge max {self.risk.max_margin_usage_pct}%"
+            f" | drawdown max {self.risk.max_drawdown_pct or 'désactivé'}%",
+            "  Sorties         : " + (f"TP1 {self.exits.tp1_fraction:.0%} à {self.exits.tp1_r:g} R"
+                                      + (f", TP2 {self.exits.tp2_fraction:.0%} à {self.exits.tp2_r:g} R"
+                                         if self.exits.tp2_fraction else "") + ", reste au TP final"
+                                      if self.exits.partial_exits else "TP unique")
+            + f" | Bouclier avant annonce : {self.exits.shield_action}"
+            + (" | fermeture si publication à contre-sens" if self.exits.shield_close_contrary else ""),
             f"  Sentiment       : {self.sentiment.engine}",
             f"  Stratégie       : profil {self.strategy.profile} | seuil hybride {self.strategy.signal_threshold}"
             f" | seuil technique {self.strategy.technical_threshold} | "
@@ -585,6 +702,7 @@ def load_settings() -> Settings:
         risk=RiskConfig(
             risk_per_trade_pct=get_float("RISK_PER_TRADE_PCT", 1.0),
             max_daily_loss_pct=get_float("RISK_MAX_DAILY_LOSS_PCT", 3.0),
+            allow_manual_real_account=get_bool("RISK_ALLOW_MANUAL_REAL_ACCOUNT", False),
             max_consecutive_losses=get_int("RISK_MAX_CONSECUTIVE_LOSSES", 2),
             max_open_positions=get_int("RISK_MAX_OPEN_POSITIONS", 2),
             max_positions_per_symbol=get_int("RISK_MAX_POSITIONS_PER_SYMBOL", 1),
@@ -599,6 +717,19 @@ def load_settings() -> Settings:
             max_spread_sl_pct=get_float("RISK_MAX_SPREAD_SL_PCT", 10.0),
             max_spread_median_ratio=get_float("RISK_MAX_SPREAD_MEDIAN_RATIO", 2.0),
             min_net_reward_risk=get_float("RISK_MIN_NET_REWARD_RISK", 3.0),
+            max_currency_risk_pct=get_float("RISK_MAX_CURRENCY_RISK_PCT", 1.5),
+            max_drawdown_pct=get_float("RISK_MAX_DRAWDOWN_PCT", 10.0),
+        ),
+        exits=ExitConfig(
+            tp1_r=get_float("EXIT_TP1_R", 1.0),
+            tp1_fraction=get_float("EXIT_TP1_FRACTION", 0.0),
+            tp2_r=get_float("EXIT_TP2_R", 2.0),
+            tp2_fraction=get_float("EXIT_TP2_FRACTION", 0.0),
+            breakeven_after_tp1=get_bool("EXIT_BREAKEVEN_AFTER_TP1", True),
+            shield_action=(get_str("SHIELD_ACTION", "none") or "none").lower(),
+            shield_reduce_fraction=get_float("SHIELD_REDUCE_FRACTION", 0.5),
+            shield_close_contrary=get_bool("SHIELD_CLOSE_CONTRARY", True),
+            shield_contrary_strength=get_float("SHIELD_CONTRARY_STRENGTH", 0.66),
         ),
         news=NewsConfig(
             newsapi_key=get_str("NEWSAPI_KEY"),
@@ -640,6 +771,29 @@ def load_settings() -> Settings:
             momentum_trailing_bars=get_int("STRATEGY_MOMENTUM_TRAILING_BARS", 3),
             momentum_trailing_atr=get_float("STRATEGY_MOMENTUM_TRAILING_ATR", 1.5),
             momentum_trailing_distance_r=get_float("STRATEGY_MOMENTUM_TRAILING_DISTANCE_R", 1.0),
+            momentum_min_h1_adx=get_float("STRATEGY_MOMENTUM_MIN_H1_ADX", 22.0),
+            momentum_h1_lookback=get_int("STRATEGY_MOMENTUM_H1_LOOKBACK", 20),
+            momentum_h1_obstacle_atr=get_float("STRATEGY_MOMENTUM_H1_OBSTACLE_ATR", 1.0),
+            momentum_h1_ema_alignment=get_bool("STRATEGY_MOMENTUM_H1_EMA_ALIGNMENT", True),
+            momentum_h1_ema_fast=get_int("STRATEGY_MOMENTUM_H1_EMA_FAST", 50),
+            momentum_h1_ema_slow=get_int("STRATEGY_MOMENTUM_H1_EMA_SLOW", 200),
+            impulse_enabled=get_bool("IMPULSE_ENABLED", False),
+            impulse_timeframe=(get_str("IMPULSE_TIMEFRAME", "M15") or "M15").upper(),
+            impulse_bars=get_int("IMPULSE_BARS", 3),
+            impulse_min_body_atr=get_float("IMPULSE_MIN_BODY_ATR", 0.4),
+            impulse_max_wick_pct=get_float("IMPULSE_MAX_WICK_PCT", 35.0),
+            impulse_min_move_atr=get_float("IMPULSE_MIN_MOVE_ATR", 1.5),
+            impulse_max_move_atr=get_float("IMPULSE_MAX_MOVE_ATR", 4.0),
+            impulse_sl_atr=get_float("IMPULSE_SL_ATR", 1.5),
+            impulse_session_only=get_bool("IMPULSE_SESSION_ONLY", True),
+            scalp_enabled=get_bool("STRATEGY_SCALP_ENABLED", get_bool("STRATEGY_SCALP_MODE", False)),
+            scalp_tp_r=get_float("STRATEGY_SCALP_TP_R", 1.2),
+            scalp_sl_atr=get_float("STRATEGY_SCALP_SL_ATR", 1.0),
+            scalp_timeframe=(get_str("STRATEGY_SCALP_TIMEFRAME", "M5") or "M5").upper(),
+            scalp_range_bars=get_int("STRATEGY_SCALP_RANGE_BARS", 12),
+            scalp_max_range_atr=get_float("STRATEGY_SCALP_MAX_RANGE_ATR", 2.0),
+            opportunity_symbols=tuple(s.upper() for s in (get_list("OPPORTUNITY_SYMBOLS")
+                                                          or get_list("TRADED_SYMBOLS"))),
         ),
         log=LogConfig(
             level=get_str("LOG_LEVEL", "INFO").upper(),

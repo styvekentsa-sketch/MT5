@@ -30,7 +30,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 from urllib.parse import quote, urlparse
@@ -168,6 +168,7 @@ class NewsArticle:
     snippet: str                     # contenu : résumé texte, sans HTML, tronqué
     feed: str = ""                   # flux d'origine (ex : « Bloomberg Markets »)
     category: str = ""               # catégorie du flux (forex, macro, central_bank...)
+    received_at: datetime | None = field(default=None, compare=False)   # réception par le bot (UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -396,6 +397,7 @@ def _fetch_feed(url: str, name: str = "", category: str = "") -> list[NewsArticl
                 snippet=_truncate(_clean_html(summary)),
                 feed=name or _domain(url),
                 category=category,
+                received_at=now,
             ))
         except Exception as exc:  # noqa: BLE001 - un article malformé n'invalide pas tout le flux
             log.debug("Article ignoré dans %s : %s", name or url, exc)

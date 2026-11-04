@@ -13,6 +13,8 @@ from typing import Callable, Iterable
 
 from config.settings import SETUP_STRATEGY_NAMES, settings
 from strategies.base import BaseStrategy
+from strategies.impulse import ImpulseStrategy
+from strategies.micro_scalp import MicroScalpStrategy
 from strategies.momentum_breakout import MomentumBreakoutStrategy
 from strategies.pullback import PullbackStrategy
 from strategies.range_rejection import RangeRejectionStrategy
@@ -21,8 +23,16 @@ SETUP_STRATEGIES: dict[str, Callable[[], BaseStrategy]] = {
     PullbackStrategy.name: PullbackStrategy,
     RangeRejectionStrategy.name: RangeRejectionStrategy,
     MomentumBreakoutStrategy.name: MomentumBreakoutStrategy,
+    ImpulseStrategy.name: ImpulseStrategy,
+    MicroScalpStrategy.name: MicroScalpStrategy,
 }
 assert tuple(SETUP_STRATEGIES) == SETUP_STRATEGY_NAMES, "config/settings.py : SETUP_STRATEGY_NAMES à mettre à jour"
+
+
+def strategy_min_ratio(name: str) -> float | None:
+    """Ratio net minimal propre à la stratégie `name` pour le vérificateur (None : règle globale)."""
+    factory = SETUP_STRATEGIES.get(name)
+    return factory().min_net_reward_risk if factory is not None else None
 
 
 def setup_strategies(names: Iterable[str] | None = None) -> list[BaseStrategy]:

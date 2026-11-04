@@ -3,6 +3,7 @@ Stratégies à setups : formules communes (marge b, ratio net, objectif), pullba
 rejet de range, symétrie achat / vente, statuts (prêt, surveillance, invalidé, expiré).
 """
 
+import re
 from datetime import datetime, timezone
 
 import numpy as np
@@ -238,6 +239,24 @@ RESTART = (1.1012, 1.1026, 1.1011, 1.1025)                       # haussière, c
 LONDON_BREAKOUT = pd.Timestamp("2026-11-02 07:00", tz="UTC")      # ouverture de la bougie de cassure
 
 
+def _h1_context(kind: str = "trend") -> pd.DataFrame:
+    """
+    H1 cohérent avec les M15 (prix ~1.10) : `trend` = tendance haussière (ADX ~26, EMA 50 > EMA 200,
+    sommet des 20 dernières bougies déjà sous l'entrée) ; `rebound` = rebond haussier fort dans une
+    tendance baissière de fond (ADX élevé mais EMA 50 < EMA 200) ; `flat` = range amorphe (ADX < 20).
+    """
+    i = np.arange(300)
+    if kind == "flat":
+        closes = 1.0995 + 0.0015 * np.sin(2 * np.pi * i / 16)
+    elif kind == "rebound":
+        closes = np.where(i < 230, 1.16 - 0.0004 * i, 1.16 - 0.0004 * 229 + 0.0005 * (i - 229))
+        closes = closes + 0.001 * np.sin(2 * np.pi * i / 10)
+        closes = closes - closes[-1] + 1.0995
+    else:
+        closes = 1.10 - 0.00012 * 299 + 0.00012 * i + 0.001 * np.sin(2 * np.pi * i / 10)
+    return ohlc(closes, start="2026-10-20", seed=11)
+
+
 def _decision_time(trig: pd.DataFrame) -> datetime:
     """Clôture de la dernière bougie M15 : instant de la décision."""
     return (trig.index[-1] + pd.Timedelta(minutes=15)).to_pydatetime()
@@ -256,7 +275,7 @@ def _momentum_frame(after=(), breakout=BREAKOUT, breakout_at=LONDON_BREAKOUT) ->
 
 def _momentum(after=(), breakout=BREAKOUT, ctx=None, quote=None, breakout_at=LONDON_BREAKOUT, now=None):
     trig = _momentum_frame(after, breakout, breakout_at)
-    ctx = _range_base().iloc[:252] if ctx is None else ctx
+    ctx = _h1_context() if ctx is None else ctx
     if quote is None:
         close = float(trig["close"].iloc[-1])
         quote = Quote(bid=close, ask=close + 0.00002, tick_size=0.00001)
@@ -327,7 +346,7 @@ def test_momentum_blocked_against_the_higher_timeframe_trend():
 def test_momentum_sell_is_the_exact_mirror_of_the_buy():
     buy, trig, quote = _momentum([*RESPIRATION, RESTART])
     k = 10.0
-    ctx = _range_base().iloc[:252]
+    ctx = _h1_context()
     sell = MomentumBreakoutStrategy().find_setup("EURUSD", {"H1": mirror_frame(ctx, k), "M15": mirror_frame(trig, k)},
                                                  _decision_time(trig), mirror_quote(quote, k))
     assert sell.side == Side.SELL and sell.status == SetupStatus.READY
@@ -342,7 +361,7 @@ def test_momentum_setups_go_through_sizing_verifier_news_and_journal(monkeypatch
     from tests.fakes import FakeBroker
 
     trig = _momentum_frame([*RESPIRATION, RESTART])
-    ctx = _range_base().iloc[:252]
+    ctx = _h1_context()
     close = float(trig["close"].iloc[-1])
     quote = Quote(bid=close, ask=close + 0.00002, tick_size=0.00001)
     broker = FakeBroker()
@@ -390,7 +409,7 @@ def test_registry_selects_strategies():
 def _momentum_for(symbol: str, frames_k: float | None = None):
     """Même marché (mêmes bougies, même cotation) analysé sous deux noms d'actif."""
     trig = _momentum_frame([*RESPIRATION, RESTART])
-    ctx = _range_base().iloc[:252]
+    ctx = _h1_context()
     close = float(trig["close"].iloc[-1])
     quote = Quote(bid=close, ask=close + 0.00002, tick_size=0.00001)
     if frames_k is not None:
@@ -502,7 +521,7 @@ def test_off_session_setups_place_no_order_and_send_no_ready_alert(monkeypatch, 
     from utils import alerts
 
     trig = _momentum_frame([*RESPIRATION, RESTART], breakout_at=pd.Timestamp("2026-11-02 01:00", tz="UTC"))
-    ctx = _range_base().iloc[:252]
+    ctx = _h1_context()
     close = float(trig["close"].iloc[-1])
     broker = FakeBroker()
     broker.account = AccountInfo(login=1, balance=10_000, equity=10_000, margin=0, margin_free=10_000, margin_level=0,
@@ -548,7 +567,7 @@ def test_server_bar_labels_convert_to_real_utc(server, utc):
 ])
 def test_momentum_sessions_use_the_server_clock(server_breakout, ready):
     trig = _momentum_frame([*RESPIRATION, RESTART], breakout_at=pd.Timestamp(server_breakout, tz="UTC"))
-    ctx = _range_base().iloc[:252]
+    ctx = _h1_context()
     close = float(trig["close"].iloc[-1])
     strategy = MomentumBreakoutStrategy()
     strategy.bar_timezone = ATHENS
@@ -652,7 +671,7 @@ def test_weak_sell_restart_is_rejected_too(strict_restart):
     buy, trig, quote = _momentum([*RESPIRATION, weak])
     k = 10.0
     sell = MomentumBreakoutStrategy().find_setup(
-        "EURUSD", {"H1": mirror_frame(_range_base().iloc[:252], k), "M15": mirror_frame(trig, k)},
+        "EURUSD", {"H1": mirror_frame(_h1_context(), k), "M15": mirror_frame(trig, k)},
         _decision_time(trig), mirror_quote(quote, k))
     assert sell.side == Side.SELL and sell.status == SetupStatus.INVALIDATED and "relance trop faible" in sell.reason
 
@@ -835,9 +854,11 @@ def test_backtest_applies_breakeven_and_trailing_and_labels_exits(monkeypatch):
                                costs=CostModel(slippage_points=0)).run()
 
     monkeypatch.setattr(MomentumBreakoutStrategy, "off_session_reason", staticmethod(lambda *a: None))
+    no_h1_filter = dict(momentum_min_h1_adx=0, momentum_h1_obstacle_atr=0, momentum_h1_ema_alignment=False)
+    _momentum_settings(monkeypatch, **no_h1_filter)              # marche aléatoire : on teste la sortie
     fixed = run()
     _momentum_settings(monkeypatch, momentum_breakeven_r=1.0, momentum_trailing_activation_r=1.5,
-                       momentum_trailing_mode="bars", momentum_trailing_bars=3)
+                       momentum_trailing_mode="bars", momentum_trailing_bars=3, **no_h1_filter)
     managed = run()
     assert fixed.trades and [t.entry_time for t in managed.trades] == [t.entry_time for t in fixed.trades]
     assert all(t.exit_reason in {"sl", "tp", "breakeven", "trailing", "end"} for t in managed.trades)
@@ -847,3 +868,119 @@ def test_backtest_applies_breakeven_and_trailing_and_labels_exits(monkeypatch):
             assert trade.profit > 0 or trade.ambiguous                # stop au-dessus de l'entrée
         if trade.exit_reason == "breakeven":
             assert abs(trade.profit) <= 0.05 * abs(trade.planned_risk)   # ~zéro (spread, arrondis)
+
+
+# ----------------------------------------------------------------- filtre de contexte H1 (breakout momentum)
+
+from strategies.momentum_breakout import H1_INVALID  # noqa: E402
+
+
+def _h1_readings(ctx):
+    closes = ctx["close"]
+    reading = detect_regime(ctx)
+    fast = closes.ewm(span=50, adjust=False).mean().iloc[-1]
+    slow = closes.ewm(span=200, adjust=False).mean().iloc[-1]
+    return reading, fast, slow
+
+
+def test_valid_h1_context_lets_the_setup_through():
+    reading, fast, slow = _h1_readings(_h1_context())
+    assert reading.adx >= 22 and fast > slow
+    setup, *_ = _momentum([*RESPIRATION, RESTART])
+    assert setup.status == SetupStatus.READY and not any(H1_INVALID in n for n in setup.notes)
+
+
+def test_flat_h1_market_is_rejected_as_amorphous():
+    flat = _h1_context("flat")
+    reading, *_ = _h1_readings(flat)
+    assert reading.adx < 22 and reading.regime not in (MarketRegime.TREND_DOWN, MarketRegime.SHOCK)
+    setup, *_ = _momentum([*RESPIRATION, RESTART], ctx=flat)
+    assert setup.status == SetupStatus.INVALIDATED
+    assert setup.notes[-1].startswith("Contexte H1 invalide : Marché amorphe (ADX H1")
+    assert f"< {22:g})" in setup.notes[-1]
+
+
+def test_m15_buy_against_the_h1_background_trend_is_rejected():
+    rebound = _h1_context("rebound")
+    reading, fast, slow = _h1_readings(rebound)
+    assert reading.adx >= 22 and fast < slow                      # rebond fort, mais fond baissier
+    setup, *_ = _momentum([*RESPIRATION, RESTART], ctx=rebound)
+    assert setup.status == SetupStatus.INVALIDATED
+    assert "tendance de fond contraire (EMA 50 sous EMA 200 en H1)" in setup.notes[-1]
+
+
+def test_sell_is_rejected_when_h1_emas_point_up():
+    """Vente M15 (miroir) dans un H1 dont l'EMA 50 est au-dessus de l'EMA 200 : contexte contraire."""
+    k = 10.0
+    buy_ctx = _h1_context("rebound")                              # miroir : EMA 50 au-dessus de l'EMA 200
+    trig = _momentum_frame([*RESPIRATION, RESTART])
+    close = float(trig["close"].iloc[-1])
+    quote = Quote(bid=close, ask=close + 0.00002, tick_size=0.00001)
+    sell = MomentumBreakoutStrategy().find_setup(
+        "EURUSD", {"H1": mirror_frame(buy_ctx, k), "M15": mirror_frame(trig, k)}, _decision_time(trig),
+        mirror_quote(quote, k))
+    assert sell.side == Side.SELL and sell.status == SetupStatus.INVALIDATED
+    assert "EMA 50 au-dessus EMA 200" in sell.notes[-1]
+
+
+def test_immediate_h1_resistance_blocks_the_buy():
+    ctx = _h1_context().copy()
+    entry = RESTART[3] + 0.00002
+    atr_h1 = detect_regime(ctx).atr
+    ctx.iloc[-6, ctx.columns.get_loc("high")] = entry + 0.5 * atr_h1             # sommet H1 non franchi, tout proche
+    setup, *_ = _momentum([*RESPIRATION, RESTART], ctx=ctx)
+    assert setup.status == SetupStatus.INVALIDATED and "obstacle H1 immédiat" in setup.notes[-1]
+    assert re.search(r"sommet des 20 dernières bougies H1 à 0\.\d\d ATR", setup.notes[-1])    # < 1 ATR (le pic gonfle l'ATR)
+
+
+def test_distant_or_broken_h1_resistance_is_accepted():
+    entry = RESTART[3] + 0.00002
+    for offset_atr in (1.5, -0.2):                                # assez loin, ou déjà franchi par le prix
+        ctx = _h1_context().copy()
+        ctx.iloc[-6, ctx.columns.get_loc("high")] = entry + offset_atr * detect_regime(ctx).atr
+        setup, *_ = _momentum([*RESPIRATION, RESTART], ctx=ctx)
+        assert setup.status == SetupStatus.READY, (offset_atr, setup.notes)
+
+
+def test_h1_filters_can_be_disabled(monkeypatch):
+    _momentum_settings(monkeypatch, momentum_min_h1_adx=0, momentum_h1_obstacle_atr=0, momentum_h1_ema_alignment=False)
+    for kind in ("flat", "rebound"):
+        setup, *_ = _momentum([*RESPIRATION, RESTART], ctx=_h1_context(kind))
+        assert setup.status == SetupStatus.READY, (kind, setup.notes)
+
+
+def test_h1_rejection_happens_before_sizing_and_alerts(monkeypatch, eurusd_specs):
+    from brokers.models import AccountInfo, Tick
+    from tests.fakes import FakeBroker
+    from utils import alerts
+
+    trig = _momentum_frame([*RESPIRATION, RESTART])
+    ctx = _h1_context("flat")
+    close = float(trig["close"].iloc[-1])
+    broker = FakeBroker()
+    broker.account = AccountInfo(login=1, balance=10_000, equity=10_000, margin=0, margin_free=10_000, margin_level=0,
+                                 profit=0, currency="USD", leverage=100)
+    broker.specs = {"EURUSD": eurusd_specs}
+    broker.ticks = {"EURUSD": Tick("EURUSD", close, close + 0.00002, 0.0, 2, _decision_time(trig))}
+    broker.get_historical_data = lambda symbol, count=100, timeframe=None: (
+        pd.concat([trig, trig.iloc[-1:].set_axis([trig.index[-1] + pd.Timedelta(minutes=15)])]) if timeframe == "M15"
+        else pd.concat([ctx, ctx.iloc[-1:].set_axis([ctx.index[-1] + pd.Timedelta(hours=1)])]))
+    sized, ready = [], []
+    monkeypatch.setattr(base, "calculate_position_size", lambda *a, **k: sized.append(a) or 0.1)
+    monkeypatch.setattr(alerts, "setup_validated", lambda setup: ready.append(setup))
+    setup = MomentumBreakoutStrategy().analyze(broker, "EURUSD", _decision_time(trig))
+    assert setup.status == SetupStatus.INVALIDATED and H1_INVALID in setup.notes[-1]
+    assert sized == [] and ready == [] and broker.orders == []
+
+
+@pytest.mark.parametrize("field, value", [
+    ("momentum_min_h1_adx", -1), ("momentum_h1_lookback", 2), ("momentum_h1_obstacle_atr", 11),
+    ("momentum_h1_ema_fast", 200),                                # rapide >= lente
+])
+def test_invalid_h1_settings(field, value):
+    from dataclasses import replace
+
+    from config.env import ConfigError
+    from config.settings import settings
+    with pytest.raises(ConfigError):
+        replace(settings.strategy, **{field: value}).validate()
