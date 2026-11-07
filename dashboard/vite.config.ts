@@ -1,11 +1,15 @@
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 
 const THEME_COLOR = "#0b0d10"; // anthracite, fond du dashboard (--color-canvas)
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // DASHBOARD_PORT (dashboard/.env) : port dédié du dashboard, 5173 par défaut. strictPort : jamais
+  // de bascule silencieuse vers un autre port (l'API n'autorise que les origines déclarées).
+  const port = Number(loadEnv(mode, process.cwd(), "").DASHBOARD_PORT) || 5173;
+  return {
   plugins: [
     react(),
     tailwindcss(),
@@ -44,6 +48,7 @@ export default defineConfig({
     }),
   ],
   // `npm run dev -- --host` pour tester depuis un téléphone du réseau local
-  server: { port: 5173, strictPort: true },
+  server: { port, strictPort: true },
   preview: { port: 4173, strictPort: true },
+  };
 });
