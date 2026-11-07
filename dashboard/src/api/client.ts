@@ -37,12 +37,21 @@ const SENTIMENT_TIMEOUT_MS = 60_000;
 const SENTIMENT_ARTICLE_LIMIT = 30;
 const DATA_FEED_ARTICLE_LIMIT = 100;
 
-/** Supprime les « / » finaux ; retourne "" si l'URL n'est pas en http(s). */
+/**
+ * Supprime les « / » finaux ; retourne "" si l'URL n'est pas en http(s).
+ * « localhost » devient 127.0.0.1 : le navigateur le résout souvent en IPv6 (::1) alors que l'API
+ * n'écoute qu'en IPv4 (API_HOST=127.0.0.1) — d'où une « API déconnectée » alors que le bot tourne.
+ */
 export function normalizeBaseUrl(url: string): string {
   const trimmed = url.trim().replace(/\/+$/, "");
   try {
-    const { protocol } = new URL(trimmed);
-    return protocol === "http:" || protocol === "https:" ? trimmed : "";
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    if (parsed.hostname === "localhost") {
+      parsed.hostname = "127.0.0.1";
+      return parsed.toString().replace(/\/+$/, "");
+    }
+    return trimmed;
   } catch {
     return "";
   }
@@ -54,7 +63,7 @@ export function normalizeBaseUrl(url: string): string {
  */
 export const DEFAULT_API_URL =
   normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? "") ||
-  `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
+  normalizeBaseUrl(`${window.location.protocol}//${window.location.hostname}:${API_PORT}`);
 
 /** Une page HTTPS ne peut pas appeler une API en HTTP (contenu mixte bloqué par le navigateur). */
 export function isMixedContent(baseUrl: string): boolean {
