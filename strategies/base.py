@@ -43,7 +43,8 @@ from utils.logger import get_logger
 
 log = get_logger(__name__)
 
-TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14_400, "D1": 86_400}
+TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14_400, "D1": 86_400,
+                     "W1": 604_800}
 
 MIN_NET_REWARD_RISK = 3.0            # gain net / perte prévue minimal d'un setup (cf. RISK_MIN_NET_REWARD_RISK)
 ENTRY_MAX_DRIFT_ATR = 0.20           # entrée refusée si le prix a fui de plus de 0.20 ATR
@@ -120,9 +121,11 @@ _MIRRORED_REGIME = {MarketRegime.TREND_UP: MarketRegime.TREND_DOWN, MarketRegime
 # Les plans d'achat décrivent leurs motifs avec ces mots ; une vente les remplace par leur symétrique
 WORDS = {
     Side.BUY: {"tendance": "haussière", "sommet": "sommet", "creux": "creux", "bas": "bas", "haut": "haut",
-               "bougie": "haussière", "tiers": "supérieur", "sous": "sous", "au_dessus": "au-dessus", "borne": "basse"},
+               "bougie": "haussière", "tiers": "supérieur", "sous": "sous", "au_dessus": "au-dessus", "borne": "basse",
+               "support": "support", "resistance": "résistance", "demande": "demande", "direction": "haussière"},
     Side.SELL: {"tendance": "baissière", "sommet": "creux", "creux": "sommet", "bas": "haut", "haut": "bas",
-                "bougie": "baissière", "tiers": "inférieur", "sous": "au-dessus", "au_dessus": "sous", "borne": "haute"},
+                "bougie": "baissière", "tiers": "inférieur", "sous": "au-dessus", "au_dessus": "sous", "borne": "haute",
+                "support": "résistance", "resistance": "support", "demande": "offre", "direction": "baissière"},
 }
 
 

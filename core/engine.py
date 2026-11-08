@@ -45,6 +45,7 @@ from models.schemas import SetupStatus
 from strategies.base import BaseStrategy
 from strategies.impulse import ImpulseStrategy, impulse
 from strategies.micro_scalp import MicroScalpStrategy
+from strategies.top_down import TopDownStrategy
 from strategies.regime import Mode, evaluate_adaptive, manage_positions, position_mode
 from strategies.strategy_manager import evaluate_market
 from utils.database import get_database
@@ -139,6 +140,7 @@ class TradingEngine:
         self.impulse: ImpulseStrategy | None = ImpulseStrategy() if settings.strategy.impulse_enabled else None
         # Petits trades (micro-scalping, objectif court) en dernier recours (STRATEGY_SCALP_ENABLED)
         self.scalp: MicroScalpStrategy | None = MicroScalpStrategy() if settings.strategy.scalp_enabled else None
+        self.topdown: TopDownStrategy | None = TopDownStrategy() if settings.strategy.topdown_enabled else None
         self.market_snapshot: dict[str, dict[str, Any]] = {}   # état du marché relu au démarrage
         self._opportunities_taken: dict[tuple[str, str], tuple] = {}   # (symbole, stratégie) -> dernier signal tradé
         # Sorties partielles TP1 / TP2, Bouclier sur annonce, suspension sur drawdown, latence par étape
@@ -401,7 +403,10 @@ class TradingEngine:
                                                 verdict=action.description))
 
     def _guard_positions(self) -> None:
-        """Sorties partielles, retour au prix d'entrée, Bouclier avant / après annonce ; actions journalisées."""
+        """
+        Sorties partielles, retour au prix d'entrée, Bouclier avant / après annonce, protection automatique
+        (prix d'entrée à +1 R, stop suiveur dès +1,5 R) ; actions journalisées, refus notifiés.
+        """
         try:
             actions = self.guard.run(get_pipeline())
         except Exception:  # noqa: BLE001
@@ -504,8 +509,11 @@ class TradingEngine:
 
     @property
     def opportunities(self) -> list[BaseStrategy]:
-        """Stratégies d'opportunité tentées, dans cet ordre, quand la stratégie principale dit HOLD."""
-        return [s for s in (self.impulse, self.scalp) if s is not None]
+        """
+        Stratégies d'opportunité tentées, dans cet ordre, quand la stratégie principale dit HOLD : analyse
+        descendante (la plus sélective) d'abord, puis impulsion et petits trades.
+        """
+        return [s for s in (self.topdown, self.impulse, self.scalp) if s is not None]
 
     def _opportunity_trade(self, symbol: str, hold: SymbolOutcome) -> SymbolOutcome:
         """
@@ -536,7 +544,7 @@ class TradingEngine:
     def _log_opportunities(self) -> None:
         modes = self.opportunity_summary()
         if not modes:
-            log.info("Trades d'opportunité : désactivés (IMPULSE_ENABLED / STRATEGY_SCALP_ENABLED)")
+            log.info("Trades d'opportunité : désactivés (TOPDOWN_ENABLED / IMPULSE_ENABLED / STRATEGY_SCALP_ENABLED)")
             return
         excluded = [s for s in self.symbols if not settings.strategy.opportunity_allowed(s)]
         log.info("Trades d'opportunité (quand la stratégie principale dit HOLD), par priorité, sur %s%s :",

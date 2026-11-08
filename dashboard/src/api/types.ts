@@ -11,6 +11,8 @@ export interface Outcome {
 }
 
 export interface Status {
+  /** Clé utilisée : complet (API_KEY) ou lecture seule (API_VIEWER_KEY) ; absent sur une ancienne version */
+  access?: "complet" | "lecture";
   state: EngineState;
   mode: Mode;
   /** Connexion au broker active (MT5 ou exchange crypto ; nom historique) */
@@ -98,6 +100,19 @@ export interface Position {
   magic: number;
   is_bot: boolean;
   comment: string;
+  /** Protection automatique (prix d'entrée à +1 R, stop suiveur dès +1,5 R) ; absente hors bot */
+  protection?: PositionProtection | null;
+}
+
+export interface PositionProtection {
+  stage: "initial" | "breakeven" | "trailing";
+  initial_stop: number;
+  /** R : distance entrée réelle - stop initial, figée à l'ouverture */
+  risk: number;
+  /** Meilleur Bid (achat) / Ask (vente) depuis l'ouverture */
+  best: number;
+  best_r: number;
+  last_error: string;
 }
 
 export interface Article {
@@ -504,6 +519,8 @@ export interface StructureZone {
   high: number;
   time: string;
   active: boolean;
+  /** Zone d'offre / de demande posée sur un niveau de l'unité de temps supérieure */
+  major?: boolean;
 }
 
 /** GET /api/analysis/structure */
@@ -525,6 +542,8 @@ export interface MarketStructureReport {
     aligned: boolean;
     timeframes: Record<string, { direction: Trend; reason: string }>;
   };
+  /** Direction hebdomadaire, règle des 3 bougies (absente sur une ancienne version) */
+  weekly?: { direction: Trend; reason: string; doji: number | null };
 }
 
 export interface SetupsReport {

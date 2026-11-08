@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from api.dependencies import build_status, get_active_broker, get_engine
 from api.routes.webhooks import ENDPOINT as WEBHOOK_ENDPOINT
@@ -26,15 +26,17 @@ from api.schemas import (
     FeedSourceOut,
     NewsItemOut,
     PositionOut,
+    ProtectionOut,
     SentimentOut,
     StatusOut,
 )
-from api.security import require_api_key
+from api.security import access_level, require_api_key
 from brokers.base import BaseBroker
 from brokers.errors import recent_errors
 from brokers.models import POSITION_TYPE_BUY, AccountInfo
 from config.settings import settings
 from core.engine import TradingEngine
+from core.position_protection import ProtectionStore, state_key
 from sentiment.news_scraper import (
     NEWS_BLOCK_MINUTES_AFTER,
     NEWS_BLOCK_MINUTES_BEFORE,
@@ -61,9 +63,9 @@ CALENDAR_HOURS_BACK = 2              # annonces passées conservées dans la tim
 
 
 @router.get("/status", response_model=StatusOut, summary="Statut du bot")
-def get_status(engine: TradingEngine = Depends(get_engine)) -> StatusOut:
-    """État de la boucle (running / paused / stopped), mode PAPER/LIVE, connexion MT5 et dernier tour."""
-    return build_status(engine)
+def get_status(request: Request, engine: TradingEngine = Depends(get_engine)) -> StatusOut:
+    """État de la boucle (running / paused / stopped), mode PAPER/LIVE, connexion MT5, dernier tour, niveau d'accès."""
+    return build_status(engine).model_copy(update={"access": access_level(request)})
 
 
 @router.get("/account", response_model=AccountOut, summary="Métriques du compte de trading")
@@ -119,7 +121,16 @@ def get_positions(
     bot_only: bool = Query(False, description="Ne retourner que les positions ouvertes par le bot"),
     broker: BaseBroker = Depends(get_active_broker),
 ) -> list[PositionOut]:
-    """Positions ouvertes sur le compte, avec prix, SL/TP et profit en cours."""
+    """Positions ouvertes sur le compte, avec prix, SL/TP, profit en cours et état de la protection automatique."""
+    protected = ProtectionStore().states if settings.protection.enabled else {}
+
+    def protection(p) -> ProtectionOut | None:
+        state = protected.get(state_key(p.magic, p.ticket))
+        if state is None:
+            return None
+        return ProtectionOut(stage=state.stage, initial_stop=state.initial_stop, risk=state.risk, best=state.best,
+                             best_r=round(state.r_multiple(state.best), 2), last_error=state.last_error)
+
     return [
         PositionOut(
             ticket=p.ticket,
@@ -136,6 +147,7 @@ def get_positions(
             magic=p.magic,
             is_bot=p.magic == settings.trading.magic_number,
             comment=p.comment,
+            protection=protection(p),
         )
         for p in broker.get_positions(bot_only=bot_only)
     ]

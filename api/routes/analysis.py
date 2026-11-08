@@ -37,7 +37,7 @@ from models.schemas import SetupStatus, TradingSetup
 from risk.drawdown import DrawdownMonitor
 from risk.risk_manager import consecutive_losses, currency_risk, daily_loss_pct
 from strategies.base import closed_candles
-from strategies.market_structure import analyze_structure, multi_timeframe_context
+from strategies.market_structure import analyze_structure, multi_timeframe_context, three_candle_direction
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -291,8 +291,12 @@ def structure(
     if timeframe not in TIMEFRAMES:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Timeframe invalide : {timeframe}")
     reading = analyze_structure(broker.get_historical_data(symbol, count=count + 1, timeframe=timeframe))
+    try:
+        weekly = three_candle_direction(closed_candles(broker.get_historical_data(symbol, count=4, timeframe="W1")))
+    except Exception as exc:  # noqa: BLE001 - la structure reste utile sans la direction hebdomadaire
+        weekly = {"direction": "range", "reason": f"données W1 indisponibles : {exc}", "doji": None, "candles": []}
     return {"symbol": symbol, "timeframe": timeframe, "summary": reading.summary(), **reading.to_dict(),
-            "context": multi_timeframe_context(broker, symbol)}
+            "context": multi_timeframe_context(broker, symbol), "weekly": weekly}
 
 
 # ----------------------------------------------------------------- performances

@@ -18,6 +18,7 @@ from strategies.micro_scalp import MicroScalpStrategy
 from strategies.momentum_breakout import MomentumBreakoutStrategy
 from strategies.pullback import PullbackStrategy
 from strategies.range_rejection import RangeRejectionStrategy
+from strategies.top_down import TopDownStrategy
 
 SETUP_STRATEGIES: dict[str, Callable[[], BaseStrategy]] = {
     PullbackStrategy.name: PullbackStrategy,
@@ -25,6 +26,7 @@ SETUP_STRATEGIES: dict[str, Callable[[], BaseStrategy]] = {
     MomentumBreakoutStrategy.name: MomentumBreakoutStrategy,
     ImpulseStrategy.name: ImpulseStrategy,
     MicroScalpStrategy.name: MicroScalpStrategy,
+    TopDownStrategy.name: TopDownStrategy,
 }
 assert tuple(SETUP_STRATEGIES) == SETUP_STRATEGY_NAMES, "config/settings.py : SETUP_STRATEGY_NAMES à mettre à jour"
 

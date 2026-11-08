@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, errorMessage, scopedConnection, type ApiError, type Connection } from "./api/client";
+import { api, errorMessage, isSameOrigin, scopedConnection, type ApiError, type Connection } from "./api/client";
 import type { AnalysisSetup, MT5LoginRequest } from "./api/types";
 import { AccountOverview } from "./components/AccountOverview";
 import { AccountsBar } from "./components/AccountsBar";
@@ -58,7 +58,9 @@ export default function App() {
   const online = useOnlineStatus();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tab, setTab] = useState<Tab>("account");
-  const enabled = connection.apiKey !== "";
+  // Sans clé, l'adresse de la page est tentée : accès en lecture seule fourni par le serveur du dashboard
+  // (DASHBOARD_AUTO_VIEWER) ; sinon l'API répond 401 et la fenêtre de connexion s'ouvre.
+  const enabled = connection.apiKey !== "" || isSameOrigin(connection.baseUrl);
 
   // Multi-comptes : la passerelle liste les comptes ; une API de compte unique répond 404 (pas de sélecteur)
   const [accountsUnsupported, setAccountsUnsupported] = useState(false);
@@ -191,6 +193,9 @@ export default function App() {
   const bannerError: ApiError | null =
     errors.find((e) => e?.kind === "network") ?? errors.find((e) => e && e.kind !== "unauthorized") ?? null;
   const apiConnected = enabled && status.data !== null && status.error === null;
+  /** Clé en lecture seule (API_VIEWER_KEY) : consultation uniquement */
+  const readOnly = status.data?.access === "lecture";
+  const canControl = apiConnected && !readOnly;
 
   const { refresh: refreshStatus } = status;
   const { refresh: refreshAccount } = account;
@@ -284,6 +289,7 @@ export default function App() {
       <ControlPanel
         status={status.data}
         apiConnected={apiConnected}
+        readOnly={readOnly}
         lastUpdated={status.lastUpdated}
         canInstall={installState.canInstall}
         onInstall={() => void handleInstall()}
@@ -363,7 +369,7 @@ export default function App() {
             currency={account.data?.currency ?? "USD"}
             lastUpdated={setups.lastUpdated}
             onRefresh={setups.refresh}
-            onExecute={apiConnected ? handleExecuteSetup : undefined}
+            onExecute={canControl ? handleExecuteSetup : undefined}
           />
         )}
         {onAnalysisView && (
@@ -382,8 +388,8 @@ export default function App() {
             account={account.data}
             connected={apiConnected ? (status.data?.mt5_connected ?? null) : false}
             session={session.data}
-            onLogin={apiConnected ? () => setLoginOpen(true) : undefined}
-            onLogout={apiConnected ? handleLogout : undefined}
+            onLogin={canControl ? () => setLoginOpen(true) : undefined}
+            onLogout={canControl ? handleLogout : undefined}
           />
           <div className="mt-4 lg:mt-6">
             <RiskLimits limits={riskLimits.data} />
@@ -411,7 +417,7 @@ export default function App() {
                 positions={positions.data}
                 currency={account.data?.currency ?? "USD"}
                 balance={account.data?.balance ?? null}
-                disabled={!apiConnected}
+                disabled={!canControl}
                 onClose={(ticket) =>
                   perform("Clôture", async () => {
                     const result = await api.closePosition(scoped, ticket);

@@ -48,6 +48,9 @@ os.environ.update({
     "EXIT_TP1_FRACTION": "0",
     "EXIT_TP2_FRACTION": "0",
     "SHIELD_ACTION": "none",
+    "PROTECT_ENABLED": "false",                        # protection automatique : activée test par test
+    "TOPDOWN_ENABLED": "false",                        # analyse descendante : activée test par test
+    "API_VIEWER_KEY": "",                              # clé en lecture seule : activée test par test
     "SHIELD_CLOSE_CONTRARY": "true",
     "LEARNING_ENABLED": "false",                       # mémoire des erreurs : activée test par test (tmp_path)
     "NEWS_RSS_FEEDS": "",

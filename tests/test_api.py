@@ -54,6 +54,21 @@ def test_api_routes_require_valid_key(client, headers):
     assert client.post("/api/control/kill-switch", headers=headers).status_code == 401
 
 
+def test_viewer_key_reads_but_cannot_act(client, monkeypatch):
+    from dataclasses import replace as dc_replace
+
+    from api import security
+
+    viewer = "cle-lecture-seule-0123456789"
+    monkeypatch.setattr(security, "settings", dc_replace(settings, api=dc_replace(settings.api, viewer_key=viewer)))
+    headers = {"X-API-Key": viewer}
+    status = client.get("/api/status", headers=headers)
+    assert status.status_code == 200 and status.json()["access"] == "lecture"
+    refused = client.post("/api/control/kill-switch", headers=headers)
+    assert refused.status_code == 403 and "lecture seule" in refused.json()["detail"]
+    assert client.get("/api/status", headers=AUTH).json()["access"] == "complet"
+
+
 def test_cors_only_allows_configured_origins(client):
     preflight = {"Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "x-api-key"}
     allowed = client.options("/api/status", headers={"Origin": "http://localhost:5173", **preflight})
@@ -105,6 +120,25 @@ def test_positions(client, broker):
     assert [p["ticket"] for p in body] == [1001, 1002]
     assert body[0]["type"] == "BUY" and body[0]["sl"] is None and body[0]["is_bot"] is True
     assert body[1]["is_bot"] is False
+
+
+def test_positions_carry_the_protection_state(client, broker, monkeypatch, tmp_path):
+    from dataclasses import replace as dc_replace
+
+    from core.position_protection import ProtectionState, ProtectionStore
+
+    store = ProtectionStore(tmp_path / "protection.json")
+    store.states[f"{settings.trading.magic_number}:1001"] = ProtectionState(
+        ticket=1001, magic=settings.trading.magic_number, symbol="EURUSD", side="BUY", entry=1.1, initial_stop=1.098,
+        risk=0.002, best=1.1036, stage="trailing")
+    monkeypatch.setattr(monitoring, "ProtectionStore", lambda: store)
+    monkeypatch.setattr(monitoring, "settings", dc_replace(settings, protection=dc_replace(settings.protection,
+                                                                                            enabled=True)))
+    broker.positions = [_position(), _position(1002, magic=0)]
+    body = client.get("/api/positions", headers=AUTH).json()
+    assert body[0]["protection"] == {"stage": "trailing", "initial_stop": 1.098, "risk": 0.002, "best": 1.1036,
+                                     "best_r": 1.8, "last_error": ""}
+    assert body[1]["protection"] is None
 
 
 def test_sentiment(client, monkeypatch):

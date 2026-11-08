@@ -113,8 +113,8 @@ export function SettingsDialog({
             className={inputClass}
           />
           <span className="block text-xs text-slate-500">
-            Même PC : <span className="font-mono">http://127.0.0.1:8000</span> · réseau local :{" "}
-            <span className="font-mono">http://192.168.x.x:8000</span> · VPS :{" "}
+            Même PC : <span className="font-mono">{DEFAULT_API_URL}</span> · réseau local :{" "}
+            <span className="font-mono">http://192.168.x.x:{new URL(DEFAULT_API_URL).port || "8000"}</span> · VPS :{" "}
             <span className="font-mono">https://bot.mondomaine.fr</span>
           </span>
           {urlInvalid && <span className="block text-xs text-rose-300">URL invalide (http:// ou https:// attendu)</span>}

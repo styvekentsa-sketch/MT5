@@ -14,6 +14,9 @@ Structure de marché, avec des définitions programmables (paramètres de `Struc
     Ce n'est qu'une estimation déduite du graphique : le carnet d'ordres réel n'est pas visible.
   - bandes de Bollinger et régime de volatilité (compression / expansion de leur largeur)
   - contexte multi-unités de temps : direction D1, H4 et H1 (EMA 20/50 + dernière cassure)
+  - règle des 3 bougies (hebdomadaire) : direction donnée par la clôture qui suit un doji
+  - zones d'offre et de demande : Order Blocks encore actifs, MAJEURS s'ils reposent sur un support
+    (demande) ou une résistance (offre) d'une unité de temps supérieure, mineurs sinon
 
 Toutes les fonctions travaillent sur les bougies CLÔTURÉES et n'utilisent jamais une bougie future
 (chaque élément porte l'heure à laquelle il est connu).
@@ -21,7 +24,7 @@ Toutes les fonctions travaillent sur les bougies CLÔTURÉES et n'utilisent jama
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Literal
 
 import numpy as np
@@ -78,6 +81,7 @@ class Zone:
     high: float
     time: str
     active: bool = True                 # FVG non comblé / Order Block non invalidé
+    major: bool = False                 # zone d'offre / de demande collée à un niveau de l'unité supérieure
 
 
 @dataclass(frozen=True)
@@ -207,6 +211,79 @@ def key_levels(pivots: list[SwingPivot], atr_value: float, tolerance_atr: float 
     if price is not None:
         levels.sort(key=lambda lv: abs(lv.price - price))
     return levels
+
+
+def is_doji(open_: float, high: float, low: float, close: float, body_ratio: float = 0.25) -> bool:
+    """Corps <= `body_ratio` de l'amplitude : acheteurs et vendeurs à égalité."""
+    span = high - low
+    return span > 0 and abs(close - open_) <= body_ratio * span
+
+
+def three_candle_direction(df: pd.DataFrame | None, doji_body_ratio: float = 0.25) -> dict[str, Any]:
+    """
+    Règle des 3 bougies sur les 3 dernières bougies CLÔTURÉES de `df` (la bougie en cours ne compte pas) :
+      - doji : hésitation ; la bougie suivante qui CLÔTURE au-dessus de son plus haut (sous son plus bas)
+        donne la direction ; la bougie d'après ne doit pas la contredire (clôture de l'autre côté du doji)
+      - doji en dernière position : confirmation attendue (range)
+      - sans doji : direction de la majorité des bougies si la dernière clôture dépasse l'ouverture
+        de la première
+    """
+    bars = df.tail(3) if df is not None else pd.DataFrame()
+    if len(bars) < 3:
+        return {"direction": "range", "reason": "moins de 3 bougies clôturées", "doji": None, "candles": []}
+    o, h, l, c = (bars[col].to_numpy(dtype=float) for col in ("open", "high", "low", "close"))
+    dojis = [i for i in range(3) if is_doji(o[i], h[i], l[i], c[i], doji_body_ratio)]
+    candles = [{"time": _stamp(bars.index, i), "open": o[i], "high": h[i], "low": l[i], "close": c[i],
+                "doji": i in dojis} for i in range(3)]
+    direction: Direction = "range"
+    if dojis:
+        d = dojis[-1]
+        if d == 2:
+            reason = "doji sur la dernière bougie : confirmation attendue"
+        else:
+            nxt = d + 1
+            if c[nxt] > h[d]:
+                direction, reason = "haussier", "clôture au-dessus du doji"
+            elif c[nxt] < l[d]:
+                direction, reason = "baissier", "clôture sous le doji"
+            else:
+                reason = "la bougie qui suit le doji clôture dans son amplitude"
+            if direction != "range" and nxt < 2:
+                back = c[2] < l[d] if direction == "haussier" else c[2] > h[d]
+                if back:
+                    direction, reason = "range", "la dernière bougie est revenue de l'autre côté du doji"
+                else:
+                    reason += ", confirmée par la bougie suivante"
+        return {"direction": direction, "reason": reason, "doji": d, "candles": candles}
+    bullish, bearish = int((c > o).sum()), int((c < o).sum())
+    if bullish >= 2 and c[2] > o[0]:
+        direction, reason = "haussier", f"{bullish} bougies haussières sur 3, clôture au-dessus de l'ouverture"
+    elif bearish >= 2 and c[2] < o[0]:
+        direction, reason = "baissier", f"{bearish} bougies baissières sur 3, clôture sous l'ouverture"
+    else:
+        reason = "bougies sans direction commune"
+    return {"direction": direction, "reason": reason, "doji": None, "candles": candles}
+
+
+def supply_demand_zones(df: pd.DataFrame, levels: list[Level], tolerance: float,
+                        params: StructureParams | None = None) -> list[Zone]:
+    """
+    Zones de demande (Order Blocks haussiers) et d'offre (baissiers) encore actives de `df` (bougies
+    clôturées). MAJEURE : la zone repose sur un support (demande) / une résistance (offre) de `levels`
+    (unité de temps supérieure), à `tolerance` près en prix ; mineure sinon.
+    """
+    p = params or StructureParams()
+    pivots = confirmed_pivots(df, span=p.swing_strength)
+    raw_breaks, _ = structure_breaks(df, pivots)
+    zones = []
+    for zone in order_blocks(df, raw_breaks, p.ob_max_lookback):
+        if not zone.active:
+            continue
+        kind = "demande" if zone.direction == "haussier" else "offre"
+        wanted = "support" if kind == "demande" else "résistance"
+        major = any(lv.kind == wanted and zone.low - tolerance <= lv.price <= zone.high + tolerance for lv in levels)
+        zones.append(replace(zone, kind=kind, major=major))
+    return zones
 
 
 def bollinger(df: pd.DataFrame, window: int = 20, std: float = 2.0, squeeze: float = 20.0,

@@ -46,11 +46,14 @@ class StopUpdate:
 
 
 def next_stop(side: str, entry: float, initial_stop: float, current_stop: float, best: float,
-              recent_extremes: Sequence[float], atr: float | None, config: TrailingStop) -> StopUpdate:
+              recent_extremes: Sequence[float], atr: float | None, config: TrailingStop,
+              breakeven_offset: float = 0.0) -> StopUpdate:
     """
     Nouveau stop après une bougie clôturée.
     `best` : meilleur prix de sortie atteint (plus haut Bid pour un achat, plus bas Ask pour une vente) ;
-    `recent_extremes` : plus bas (achat) / plus hauts (vente) des dernières bougies clôturées.
+    `recent_extremes` : plus bas (achat) / plus hauts (vente) des dernières bougies clôturées ;
+    `breakeven_offset` : marge (en prix, côté gain) ajoutée au prix d'entrée du breakeven pour couvrir
+    les frais estimés (commission, glissement).
     """
     sign = 1.0 if side == "BUY" else -1.0
     # espace « achat » : une vente est traitée sur les prix opposés
@@ -61,8 +64,9 @@ def next_stop(side: str, entry: float, initial_stop: float, current_stop: float,
     gain = b - e
     reached = lambda r: r > 0 and gain >= r * risk * (1 - PRICE_TOLERANCE)  # noqa: E731
     stop = s
+    breakeven = e + max(breakeven_offset, 0.0)
     if reached(config.breakeven_r):
-        stop = max(stop, e)
+        stop = max(stop, min(breakeven, b))
     if reached(config.activation_r):
         if config.mode == "bars":
             window = [sign * x for x in recent_extremes][-config.bars:]
@@ -74,7 +78,7 @@ def next_stop(side: str, entry: float, initial_stop: float, current_stop: float,
         if candidate is not None:
             stop = max(stop, min(candidate, b))           # jamais au-delà du meilleur prix atteint
     tolerance = PRICE_TOLERANCE * max(abs(e), 1.0)
-    if abs(stop - e) <= tolerance:
+    if abs(stop - e) <= tolerance or abs(stop - breakeven) <= tolerance:
         stage = "breakeven"
     elif stop > s0 + tolerance:
         stage = "trailing"

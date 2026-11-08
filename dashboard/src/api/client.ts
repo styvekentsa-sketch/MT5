@@ -30,7 +30,6 @@ export interface Connection {
   apiKey: string;
 }
 
-const API_PORT = 8000;
 const DEFAULT_TIMEOUT_MS = 8_000;
 // Le premier appel peut télécharger tous les flux RSS côté serveur
 const SENTIMENT_TIMEOUT_MS = 60_000;
@@ -39,15 +38,16 @@ const DATA_FEED_ARTICLE_LIMIT = 100;
 
 /**
  * Supprime les « / » finaux ; retourne "" si l'URL n'est pas en http(s).
- * « localhost » devient 127.0.0.1 : le navigateur le résout souvent en IPv6 (::1) alors que l'API
- * n'écoute qu'en IPv4 (API_HOST=127.0.0.1) — d'où une « API déconnectée » alors que le bot tourne.
+ * « localhost » d'une AUTRE origine que la page devient 127.0.0.1 : le navigateur le résout souvent en
+ * IPv6 (::1) alors que l'API n'écoute qu'en IPv4 (API_HOST=127.0.0.1). La page elle-même est laissée
+ * telle quelle (appels relayés par le serveur du dashboard).
  */
 export function normalizeBaseUrl(url: string): string {
   const trimmed = url.trim().replace(/\/+$/, "");
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    if (parsed.hostname === "localhost") {
+    if (parsed.hostname === "localhost" && parsed.origin !== window.location.origin) {
       parsed.hostname = "127.0.0.1";
       return parsed.toString().replace(/\/+$/, "");
     }
@@ -58,12 +58,22 @@ export function normalizeBaseUrl(url: string): string {
 }
 
 /**
- * URL par défaut : VITE_API_BASE_URL (build), sinon même hôte que la page sur le port 8000.
- * Un téléphone qui ouvre http://192.168.1.20:5173 vise ainsi http://192.168.1.20:8000.
+ * URL par défaut : VITE_API_BASE_URL (build), sinon l'adresse de la page elle-même : le serveur du
+ * dashboard relaie /api vers le bot (vite.config.ts). Le même lien fonctionne donc sur ce PC, sur le
+ * réseau local et à distance (Tailscale), sans ouvrir le port de l'API.
  */
+/** API jointe par l'adresse de la page : le serveur du dashboard peut alors fournir l'accès en lecture seule. */
+export function isSameOrigin(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 export const DEFAULT_API_URL =
   normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_API_URL ?? "") ||
-  normalizeBaseUrl(`${window.location.protocol}//${window.location.hostname}:${API_PORT}`);
+  normalizeBaseUrl(window.location.origin);
 
 /** Une page HTTPS ne peut pas appeler une API en HTTP (contenu mixte bloqué par le navigateur). */
 export function isMixedContent(baseUrl: string): boolean {
@@ -135,7 +145,8 @@ async function request<T>(conn: Connection, path: string, options: RequestOption
     response = await fetch(`${conn.baseUrl}${path}`, {
       method,
       headers: {
-        "X-API-Key": conn.apiKey,
+        // sans clé : le serveur du dashboard peut fournir la clé en lecture seule (DASHBOARD_AUTO_VIEWER)
+        ...(conn.apiKey ? { "X-API-Key": conn.apiKey } : {}),
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,

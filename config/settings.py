@@ -46,7 +46,9 @@ VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 TRAILING_MODES = ("bars", "atr", "r")       # risk/trailing.py
 
 # Stratégies à setups disponibles (strategies/registry.py), choisies par SETUP_STRATEGIES
-SETUP_STRATEGY_NAMES = ("pullback", "range_rejet", "momentum_breakout", "impulsion", "petits_trades")
+SETUP_STRATEGY_NAMES = ("pullback", "range_rejet", "momentum_breakout", "impulsion", "petits_trades", "descendante")
+# Analyse descendante : actifs à fortes variations (métaux, crypto, indices) raffinés jusqu'en M5, les autres en M15
+DEFAULT_TOPDOWN_FINE_SYMBOLS = "XAU,XAG,BTC,ETH,US30,NAS,US100,USTEC,SPX,US500,GER,DE40"
 # Multiplicateur de la marge de protection b par actif (breakout momentum) : actifs à fortes mèches
 DEFAULT_MARGIN_MULTIPLIERS = "XAUUSD:1.5,XAGUSD:1.5"
 MAX_MARGIN_MULTIPLIER = 5.0
@@ -306,6 +308,37 @@ class ExitConfig:
 
 
 @dataclass(frozen=True)
+class ProtectionConfig:
+    """
+    Protection automatique de chaque position du robot (core/position_protection.py) : retour au prix
+    d'entrée à +1 R, stop suiveur à 1 R du meilleur prix dès +1,5 R, pas minimal de 0,1 R.
+    """
+    enabled: bool = True
+    breakeven_r: float = 1.0               # gain latent (en R) qui ramène le stop au prix d'entrée (0 = jamais)
+    breakeven_margin_points: float = 0.0   # marge au-delà du prix d'entrée (glissement, swap), en points
+    commission_per_lot: float = 0.0        # commission aller-retour par lot (devise du compte), ajoutée à la marge
+    trailing_start_r: float = 1.5          # gain latent (en R) qui active le stop suiveur (0 = jamais)
+    trailing_distance_r: float = 1.0       # distance du stop suiveur au meilleur prix atteint, en R
+    min_step_r: float = 0.1                # amélioration minimale du stop avant une modification, en R
+    take_profit_r: float = 3.0             # TP posé sur une position qui n'en a pas (0 = aucun) ; jamais modifié sinon
+    retry_seconds: int = 30                # délai avant un nouvel essai après un refus du courtier
+
+    def validate(self) -> None:
+        if self.breakeven_r < 0 or self.trailing_start_r < 0 or self.take_profit_r < 0:
+            raise ConfigError("PROTECT_BREAKEVEN_R, PROTECT_TRAILING_START_R et PROTECT_TAKE_PROFIT_R doivent être >= 0")
+        if self.trailing_distance_r <= 0:
+            raise ConfigError("PROTECT_TRAILING_DISTANCE_R doit être > 0")
+        if self.trailing_start_r and self.trailing_distance_r > self.trailing_start_r:
+            raise ConfigError("PROTECT_TRAILING_DISTANCE_R doit rester <= PROTECT_TRAILING_START_R : le stop "
+                              "suiveur ne doit jamais repasser sous le prix d'entrée")
+        if not 0 <= self.min_step_r < 1:
+            raise ConfigError("PROTECT_MIN_STEP_R doit être compris entre 0 et 1 (exclu)")
+        if self.breakeven_margin_points < 0 or self.commission_per_lot < 0 or self.retry_seconds < 0:
+            raise ConfigError("PROTECT_BREAKEVEN_MARGIN_POINTS, PROTECT_COMMISSION_PER_LOT et "
+                              "PROTECT_RETRY_SECONDS doivent être >= 0")
+
+
+@dataclass(frozen=True)
 class NewsConfig:
     newsapi_key: str = field(repr=False)
     finnhub_api_key: str = field(repr=False)
@@ -400,6 +433,12 @@ class StrategyConfig:
     scalp_timeframe: str = "M5"
     scalp_range_bars: int = 12
     scalp_max_range_atr: float = 2.0
+    # Analyse descendante (strategies/top_down.py) : direction W1, support / résistance D1, offre / demande H4,
+    # entrée raffinée de H1 jusqu'en M15 (M5 pour les actifs de topdown_fine_symbols)
+    topdown_enabled: bool = False                 # le moteur ouvre ces trades quand sa stratégie dit HOLD
+    topdown_max_sl_atr: float = 1.0               # stop maximal en ATR H4 : au-delà, entrée raffinée plus bas
+    topdown_min_touches: int = 3                  # touches minimales d'un support / d'une résistance D1
+    topdown_fine_symbols: tuple[str, ...] = tuple(DEFAULT_TOPDOWN_FINE_SYMBOLS.split(","))
     # Liste blanche des trades d'opportunité (impulsion, petits trades) ; vide = tous les symboles suivis
     opportunity_symbols: tuple[str, ...] = ()
 
@@ -462,6 +501,10 @@ class StrategyConfig:
             raise ConfigError("IMPULSE_MIN_BODY_ATR doit être compris entre 0 et 3")
         if not 0 < self.impulse_max_wick_pct <= 100:
             raise ConfigError("IMPULSE_MAX_WICK_PCT doit être compris entre 0 (exclu) et 100")
+        if not 0.2 <= self.topdown_max_sl_atr <= 3:
+            raise ConfigError("TOPDOWN_MAX_SL_ATR doit être compris entre 0.2 et 3 (ATR H4)")
+        if not 2 <= self.topdown_min_touches <= 6:
+            raise ConfigError("TOPDOWN_MIN_TOUCHES doit être compris entre 2 et 6")
         if not 0.3 <= self.impulse_sl_atr <= 5:
             raise ConfigError("IMPULSE_SL_ATR doit être compris entre 0.3 et 5 (stop loss obligatoire)")
         if not 2 <= self.momentum_h1_ema_fast < self.momentum_h1_ema_slow <= 390:
@@ -507,6 +550,7 @@ class ApiConfig:
     api_key: str = field(repr=False)
     cors_origins: tuple[str, ...]
     webhook_secret: str = field(default="", repr=False)   # vide = réception de webhooks désactivée
+    viewer_key: str = field(default="", repr=False)       # clé en lecture seule (GET uniquement), vide = aucune
 
     @property
     def is_local_only(self) -> bool:
@@ -525,6 +569,10 @@ class ApiConfig:
             raise ConfigError("WEBHOOK_SECRET doit être différent d'API_KEY (il est collé dans TradingView)")
         if len(self.api_key) < API_KEY_MIN_LENGTH:
             raise ConfigError(f"API_ENABLED=true nécessite une API_KEY d'au moins {API_KEY_MIN_LENGTH} caractères")
+        if self.viewer_key and len(self.viewer_key) < API_KEY_MIN_LENGTH:
+            raise ConfigError(f"API_VIEWER_KEY doit faire au moins {API_KEY_MIN_LENGTH} caractères")
+        if self.viewer_key and self.viewer_key in (self.api_key, self.webhook_secret):
+            raise ConfigError("API_VIEWER_KEY doit être différente d'API_KEY et de WEBHOOK_SECRET")
         if not 1 <= self.port <= 65535:
             raise ConfigError(f"API_PORT invalide : {self.port}")
         if "*" in self.cors_origins:
@@ -604,6 +652,7 @@ class Settings:
     adaptive: AdaptiveConfig = field(default_factory=lambda: AdaptiveConfig(((420, 600), (750, 930)), (420, 1200), 1230))
     learning: LearningConfig = field(default_factory=lambda: LearningConfig(False, BASE_DIR / "data" / "learning", 2, 0.6, 30))
     exits: ExitConfig = field(default_factory=ExitConfig)
+    protection: ProtectionConfig = field(default_factory=ProtectionConfig)
 
     @property
     def mode(self) -> str:
@@ -628,7 +677,7 @@ class Settings:
                 "momentum ; abaisser aussi RISK_MIN_NET_REWARD_RISK pour tester un objectif plus proche")
         for section in (self.trading, self.risk, self.news,
                         self.sentiment, self.strategy, self.log, self.api, self.notifier,
-                        self.database, self.adaptive, self.learning, self.exits):
+                        self.database, self.adaptive, self.learning, self.exits, self.protection):
             section.validate()
 
     def summary(self) -> str:
@@ -651,6 +700,10 @@ class Settings:
                                       if self.exits.partial_exits else "TP unique")
             + f" | Bouclier avant annonce : {self.exits.shield_action}"
             + (" | fermeture si publication à contre-sens" if self.exits.shield_close_contrary else ""),
+            "  Protection      : " + (f"prix d'entrée à +{self.protection.breakeven_r:g} R, stop suiveur à "
+                                      f"{self.protection.trailing_distance_r:g} R du meilleur prix dès "
+                                      f"+{self.protection.trailing_start_r:g} R (pas {self.protection.min_step_r:g} R)"
+                                      if self.protection.enabled else "désactivée"),
             f"  Sentiment       : {self.sentiment.engine}",
             f"  Stratégie       : profil {self.strategy.profile} | seuil hybride {self.strategy.signal_threshold}"
             f" | seuil technique {self.strategy.technical_threshold} | "
@@ -731,6 +784,17 @@ def load_settings() -> Settings:
             shield_close_contrary=get_bool("SHIELD_CLOSE_CONTRARY", True),
             shield_contrary_strength=get_float("SHIELD_CONTRARY_STRENGTH", 0.66),
         ),
+        protection=ProtectionConfig(
+            enabled=get_bool("PROTECT_ENABLED", True),
+            breakeven_r=get_float("PROTECT_BREAKEVEN_R", 1.0),
+            breakeven_margin_points=get_float("PROTECT_BREAKEVEN_MARGIN_POINTS", 0.0),
+            commission_per_lot=get_float("PROTECT_COMMISSION_PER_LOT", 0.0),
+            trailing_start_r=get_float("PROTECT_TRAILING_START_R", 1.5),
+            trailing_distance_r=get_float("PROTECT_TRAILING_DISTANCE_R", 1.0),
+            min_step_r=get_float("PROTECT_MIN_STEP_R", 0.1),
+            take_profit_r=get_float("PROTECT_TAKE_PROFIT_R", 3.0),
+            retry_seconds=get_int("PROTECT_RETRY_SECONDS", 30),
+        ),
         news=NewsConfig(
             newsapi_key=get_str("NEWSAPI_KEY"),
             finnhub_api_key=get_str("FINNHUB_API_KEY"),
@@ -792,6 +856,11 @@ def load_settings() -> Settings:
             scalp_timeframe=(get_str("STRATEGY_SCALP_TIMEFRAME", "M5") or "M5").upper(),
             scalp_range_bars=get_int("STRATEGY_SCALP_RANGE_BARS", 12),
             scalp_max_range_atr=get_float("STRATEGY_SCALP_MAX_RANGE_ATR", 2.0),
+            topdown_enabled=get_bool("TOPDOWN_ENABLED", False),
+            topdown_max_sl_atr=get_float("TOPDOWN_MAX_SL_ATR", 1.0),
+            topdown_min_touches=get_int("TOPDOWN_MIN_TOUCHES", 3),
+            topdown_fine_symbols=tuple(s.upper() for s in get_list("TOPDOWN_FINE_SYMBOLS",
+                                                                     DEFAULT_TOPDOWN_FINE_SYMBOLS)),
             opportunity_symbols=tuple(s.upper() for s in (get_list("OPPORTUNITY_SYMBOLS")
                                                           or get_list("TRADED_SYMBOLS"))),
         ),
@@ -808,6 +877,7 @@ def load_settings() -> Settings:
             api_key=get_str("API_KEY"),
             cors_origins=get_list("API_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"),
             webhook_secret=get_str("WEBHOOK_SECRET"),
+            viewer_key=get_str("API_VIEWER_KEY"),
         ),
         notifier=NotifierConfig(
             telegram_bot_token=get_str("TELEGRAM_BOT_TOKEN"),

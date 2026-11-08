@@ -18,6 +18,8 @@ interface ControlPanelProps {
   onOpenSettings: () => void;
   /** Multi-comptes : compte visé par toutes les actions de ce panneau */
   accountLabel?: string;
+  /** Clé en lecture seule : commandes désactivées */
+  readOnly?: boolean;
 }
 
 type BusyAction = "start" | "stop" | "mode" | "kill";
@@ -86,6 +88,7 @@ export function ControlPanel({
   onKillSwitch,
   onOpenSettings,
   accountLabel,
+  readOnly = false,
 }: ControlPanelProps) {
   const onAccount = accountLabel ? <> sur le compte <strong className="text-white">{accountLabel}</strong></> : null;
   const [busy, setBusy] = useState<BusyAction | null>(null);
@@ -102,7 +105,7 @@ export function ControlPanel({
     }
   };
 
-  const controlsDisabled = !apiConnected || !status || busy !== null;
+  const controlsDisabled = !apiConnected || !status || busy !== null || readOnly;
   const isLive = status?.mode === "LIVE";
   const canStart = status?.state === "paused" || status?.state === "stopped";
   const segment = "min-h-11 flex-1 rounded-lg px-2 text-xs font-bold transition disabled:cursor-not-allowed lg:flex-none lg:px-3";
@@ -141,6 +144,14 @@ export function ControlPanel({
               </span>
             )}
             <ModePill mode={apiConnected ? status?.mode : undefined} />
+            {apiConnected && readOnly && (
+              <span
+                className="inline-flex items-center rounded border border-slate-500/50 bg-slate-500/15 px-2.5 py-1 text-xs font-medium text-slate-300"
+                title="Clé en lecture seule (API_VIEWER_KEY) : consultation uniquement, aucune action possible"
+              >
+                Lecture seule
+              </span>
+            )}
             {status && (
               <span className="hidden items-center gap-1.5 text-xs text-slate-400 sm:inline-flex">
                 <Activity className="size-3.5" aria-hidden />
@@ -207,7 +218,7 @@ export function ControlPanel({
             variant="danger"
             size="lg"
             icon={<Power className="size-4" />}
-            disabled={!apiConnected || busy !== null}
+            disabled={!apiConnected || busy !== null || readOnly}
             loading={busy === "kill"}
             onClick={() => setKillDialogOpen(true)}
             className="px-2 tracking-wider uppercase lg:px-5"

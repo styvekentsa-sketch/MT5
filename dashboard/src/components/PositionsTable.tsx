@@ -1,6 +1,6 @@
 import { Bot, CandlestickChart, User, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { Position } from "../api/types";
+import type { Position, PositionProtection } from "../api/types";
 import { formatMoney, formatNumber, formatPct, formatSignedMoney, signColor, timeAgo } from "../lib/format";
 import { Button } from "./ui/Button";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
@@ -59,6 +59,31 @@ function OriginIcon({ isBot }: { isBot: boolean }) {
 }
 
 const price = (v: number | null) => (v === null ? "—" : formatNumber(v));
+
+const STAGE: Record<PositionProtection["stage"], { label: string; className: string }> = {
+  initial: { label: "Stop initial", className: "text-slate-400" },
+  breakeven: { label: "Prix d'entrée", className: "text-sky-300" },
+  trailing: { label: "Stop suiveur", className: "text-emerald-300" },
+};
+
+/** Étape de la protection automatique et meilleur gain atteint (en R) ; refus du courtier signalé. */
+function ProtectionBadge({ protection }: { protection: PositionProtection | null | undefined }) {
+  if (!protection) return null;
+  const stage = STAGE[protection.stage];
+  return (
+    <div
+      className={`mt-0.5 font-sans text-[11px] ${protection.last_error ? "text-rose-300" : stage.className}`}
+      title={
+        protection.last_error
+          ? `Dernière modification refusée : ${protection.last_error}`
+          : `Stop initial ${formatNumber(protection.initial_stop)} · meilleur prix ${formatNumber(protection.best)}`
+      }
+    >
+      {stage.label} · max {protection.best_r >= 0 ? "+" : ""}
+      {formatNumber(protection.best_r, 2)} R{protection.last_error && " · refus"}
+    </div>
+  );
+}
 
 /** Positions ouvertes : tableau sur grand écran, cartes sur mobile ; clôture unitaire confirmée. */
 export function PositionsTable({ positions, currency, balance, disabled, onClose }: PositionsTableProps) {
@@ -130,6 +155,7 @@ export function PositionsTable({ positions, currency, balance, disabled, onClose
                     <td className="px-4 py-3 whitespace-nowrap">
                       <div className="text-rose-300/80">{price(p.sl)}</div>
                       <div className="text-xs text-emerald-300/80">{price(p.tp)}</div>
+                      <ProtectionBadge protection={p.protection} />
                     </td>
                     <td className="px-4 py-2 whitespace-nowrap">
                       <LivePnl value={p.profit + p.swap} currency={currency} balance={balance} />
@@ -163,6 +189,9 @@ export function PositionsTable({ positions, currency, balance, disabled, onClose
                   <span>Actuel {price(p.price_current)}</span>
                   <span className="text-rose-300/80">SL {price(p.sl)}</span>
                   <span className="text-emerald-300/80">TP {price(p.tp)}</span>
+                  <span className="col-span-2">
+                    <ProtectionBadge protection={p.protection} />
+                  </span>
                 </div>
                 <div className="flex items-center justify-between text-xs text-slate-500">
                   <span>

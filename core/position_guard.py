@@ -10,6 +10,9 @@ Gardien des positions ouvertes du bot, appliqué à chaque tour quel que soit le
      position est assez en gain : le stop n'est jamais resserré à l'aveugle), reduce ou close.
   3. Après publication : une position dont le scénario est invalidé (effet de force >=
      SHIELD_CONTRARY_STRENGTH à contre-sens, fiche encore valide) est fermée (SHIELD_CLOSE_CONTRARY).
+  4. Protection automatique (PROTECT_*, core/position_protection.py) : prix d'entrée + frais à +1 R,
+     stop suiveur à 1 R du meilleur prix dès +1,5 R, R et meilleur prix sauvegardés. Elle ne joue pas
+     au tour où une autre action vient de toucher la position (état relu au tour suivant).
 
 L'étape d'une position (avant TP1, après TP1, après TP2) se déduit de son volume restant comparé
 au volume initial : elle survit donc à un redémarrage. Le volume initial et le stop d'origine
@@ -26,6 +29,7 @@ from typing import Any
 from brokers.base import BaseBroker
 from config.settings import settings
 from core.news_pipeline import NewsPipeline
+from core.position_protection import PositionProtection, ProtectionStore
 from utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -51,6 +55,7 @@ class GuardAction:
     kind: str                        # tp1, tp2, breakeven, shield_breakeven, shield_reduce, shield_close, invalidated
     description: str
     success: bool
+    changed: bool = True             # False : rien n'a été envoyé au courtier (action seulement constatée)
 
 
 def exit_levels(side: str, entry: float, stop: float, take_profit: float | None) -> dict[str, float | None]:
@@ -69,10 +74,12 @@ def _side(position: Any) -> str:
 
 
 class PositionGuard:
-    def __init__(self, broker: BaseBroker, memory=None) -> None:
+    def __init__(self, broker: BaseBroker, memory=None, protection_store: ProtectionStore | None = None) -> None:
         self.broker = broker
         self.memory = memory
         self.plans: dict[int, ExitPlan] = {}
+        self._protection_store = protection_store
+        self._protection: PositionProtection | None = None
         self._shielded: set[tuple[int, str]] = set()      # (ticket, annonce) : une seule action par annonce
 
     # ------------------------------------------------------------------ plan de sortie
@@ -164,7 +171,7 @@ class PositionGuard:
         stop = self._breakeven_stop(position, plan)
         if stop is None:
             return GuardAction(position.symbol, position.ticket, "breakeven",
-                               "après TP1 : stop déjà protégé ou prix trop proche de l'entrée", True)
+                               "après TP1 : stop déjà protégé ou prix trop proche de l'entrée", True, changed=False)
         return self._move_stop(position, stop, "breakeven", "après TP1")
 
     # ------------------------------------------------------------------ Bouclier
@@ -190,7 +197,8 @@ class PositionGuard:
                 stop = self._breakeven_stop(position, plan) if plan else None
                 actions.append(self._move_stop(position, stop, "shield_breakeven", why) if stop is not None else
                                GuardAction(position.symbol, position.ticket, "shield_breakeven",
-                                           f"{why} : position pas assez en gain, stop d'origine conservé", True))
+                                           f"{why} : position pas assez en gain, stop d'origine conservé", True,
+                                           changed=False))
         if cfg.shield_close_contrary:
             for card in pipeline.cards(now=now, hours_before=1, hours_after=0):
                 effect = card.effects.get(position.symbol)
@@ -207,6 +215,20 @@ class PositionGuard:
                                            f"force {effect.strength:.2f})"))
         return actions
 
+    # ------------------------------------------------------------------ protection automatique
+
+    @property
+    def protection(self) -> PositionProtection:
+        """Créée au premier usage : le fichier d'états n'est lu que si la protection est active."""
+        if self._protection is None:
+            self._protection = PositionProtection(self.broker, self._protection_store)
+        return self._protection
+
+    def _protect(self, position: Any) -> list[GuardAction]:
+        plan = self._plan(position)
+        return [GuardAction(a.symbol, a.ticket, a.kind, a.description, a.success)
+                for a in self.protection.protect(position, plan.stop if plan else None)]
+
     # ------------------------------------------------------------------ tour
 
     def run(self, pipeline: NewsPipeline | None = None, now: datetime | None = None) -> list[GuardAction]:
@@ -218,12 +240,21 @@ class PositionGuard:
                 shield = self._shield(position, pipeline, now) if pipeline is not None else []
                 actions += shield
                 if not any(a.success and a.kind in ("shield_close", "invalidated") for a in shield):
-                    actions += self._exits(position)
+                    exits = self._exits(position)
+                    actions += exits
+                    touched = any(a.success and a.changed for a in shield + exits)
+                    if settings.protection.enabled and not touched:
+                        actions += self._protect(position)
             except Exception:  # noqa: BLE001 - une position en erreur n'empêche pas les autres
                 log.exception("[%s] Gestion de la position #%s impossible", position.symbol, position.ticket)
         live = {p.ticket for p in positions}
         for ticket in [t for t in self.plans if t not in live]:
             del self.plans[ticket]
+        if settings.protection.enabled:
+            try:
+                self.protection.forget_closed(positions)
+            except Exception:  # noqa: BLE001
+                log.exception("Nettoyage des états de protection impossible")
         for action in actions:
             (log.warning if action.success else log.error)("[%s] %s", action.symbol, action.description)
         return actions

@@ -48,6 +48,12 @@ function StructureView({ report }: { report: MarketStructureReport }) {
   return (
     <div className="space-y-3 px-4 py-3 sm:px-5">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+        {report.weekly && (
+          <span title={`Règle des 3 bougies : ${report.weekly.reason}`}>
+            <span className="font-mono text-[11px] text-slate-500">W1</span>{" "}
+            <span className={TREND_STYLE[report.weekly.direction]}>{report.weekly.direction}</span>
+          </span>
+        )}
         {Object.entries(ctx.timeframes).map(([tf, d]) => (
           <span key={tf} title={d.reason}>
             <span className="font-mono text-[11px] text-slate-500">{tf}</span>{" "}

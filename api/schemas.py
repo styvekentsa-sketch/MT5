@@ -29,6 +29,8 @@ class OpportunityOut(BaseModel):
 
 
 class StatusOut(BaseModel):
+    access: Literal["complet", "lecture"] = Field(
+        "complet", description="Niveau de la clé utilisée : complet (API_KEY) ou lecture seule (API_VIEWER_KEY)")
     state: Literal["running", "paused", "stopped"] = Field(
         description="running = boucle active, paused = boucle active sans nouveaux trades, stopped = boucle arrêtée")
     mode: Mode
@@ -75,6 +77,16 @@ class AccountOut(BaseModel):
     daily_pl_pct: float = Field(description="P/L du jour en % du solde de début de journée")
 
 
+class ProtectionOut(BaseModel):
+    """Protection automatique de la position (core/position_protection.py)."""
+    stage: Literal["initial", "breakeven", "trailing"]
+    initial_stop: float
+    risk: float = Field(description="R : distance entrée réelle - stop initial, figée à l'ouverture")
+    best: float = Field(description="Meilleur Bid (achat) / Ask (vente) atteint depuis l'ouverture")
+    best_r: float = Field(description="Meilleur gain latent atteint, en R")
+    last_error: str = ""
+
+
 class PositionOut(BaseModel):
     ticket: int
     symbol: str
@@ -90,6 +102,7 @@ class PositionOut(BaseModel):
     magic: int
     is_bot: bool = Field(description="True si la position a été ouverte par ce bot (magic number)")
     comment: str
+    protection: ProtectionOut | None = None
 
 
 class ArticleOut(BaseModel):
